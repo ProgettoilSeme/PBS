@@ -361,6 +361,7 @@ function updateReadmePluginMeta(string $readmePath, string $newVersion, string $
 
 	$before = $raw;
 
+	// Pattern legacy (LSA):
 	// - Versione plugin (header `main.php`): `x.y.z`
 	$raw = preg_replace_callback(
 		'/^(\s*[-*]\s*Versione\s+plugin\s*\(header\s*`main\.php`\)\s*:\s*)(`?)[0-9.]+(`?)/mi',
@@ -370,9 +371,30 @@ function updateReadmePluginMeta(string $readmePath, string $newVersion, string $
 		$raw
 	);
 
-	// - Data di rilascio: `YYYY-MM-DD` (preserva eventuali commenti a fine riga)
+	// Pattern PBS README:
+	// - Versione plugin: `x.y.z`
+	$raw = preg_replace_callback(
+		'/^(\s*[-*]\s*Versione\s+plugin\s*:\s*)(`?)[0-9.]+(`?)/mi',
+		function ($m) use ($newVersion) {
+			return (string)($m[1] ?? '') . (string)($m[2] ?? '') . $newVersion . (string)($m[3] ?? '');
+		},
+		$raw
+	);
+
+	// Pattern legacy (LSA):
+	// - Data di rilascio: `YYYY-MM-DD`
 	$raw = preg_replace_callback(
 		'/^(\s*[-*]\s*Data\s+di\s+rilascio\s*:\s*)(`?)[0-9]{4}-[0-9]{2}-[0-9]{2}(`?)/mi',
+		function ($m) use ($releaseDate) {
+			return (string)($m[1] ?? '') . (string)($m[2] ?? '') . $releaseDate . (string)($m[3] ?? '');
+		},
+		$raw
+	);
+
+	// Pattern PBS README:
+	// - Data: `YYYY-MM-DD`
+	$raw = preg_replace_callback(
+		'/^(\s*[-*]\s*Data\s*:\s*)(`?)[0-9]{4}-[0-9]{2}-[0-9]{2}(`?)/mi',
 		function ($m) use ($releaseDate) {
 			return (string)($m[1] ?? '') . (string)($m[2] ?? '') . $releaseDate . (string)($m[3] ?? '');
 		},

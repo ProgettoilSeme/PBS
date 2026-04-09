@@ -9,7 +9,7 @@ Obiettivo concettuale e specifica: vedere `main.md`.
 
 ## Versione
 
-- Versione plugin: `0.0.0`
+- Versione plugin: `0.0.1`
 - Data: `2026-04-09`
 
 ---
