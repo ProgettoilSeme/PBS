@@ -1,0 +1,17 @@
+# Node / build
+/node_modules
+/build
+/tmp
+
+# Composer / vendors
+/vendor
+/external-libs/vendor
+
+# Logs
+*.log
+/logs
+
+# Local issue drafts (keep archive under version control)
+/tools/issues/drafts/*.md
+!/tools/issues/drafts/.gitkeep
+
