@@ -35,3 +35,12 @@ Env consigliate:
 php tools/bump-with-issue.php --issue 123
 ```
 
+Modalità utili:
+
+```bash
+# Solo piano (nessuna modifica al repo)
+php tools/bump-with-issue.php --issue 123 --plan
+
+# Applica modifiche ai file ma non fa commit/push/PR
+php tools/bump-with-issue.php --issue 123 --no-commit
+```

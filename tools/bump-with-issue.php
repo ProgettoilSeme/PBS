@@ -121,6 +121,8 @@ function slugify(string $s): string {
 function parseArgs(array $argv): array {
 	$args = [
 		'issue' => null, // se null: auto pick
+		'plan' => false,
+		'no_commit' => false,
 		'no_merge' => false,
 		'no_tag' => false,
 		'no_release' => true, // default: non crea release (solo tag).
@@ -135,6 +137,14 @@ function parseArgs(array $argv): array {
 		}
 		if ($k === '--auto') {
 			$args['issue'] = null;
+			continue;
+		}
+		if ($k === '--plan') {
+			$args['plan'] = true;
+			continue;
+		}
+		if ($k === '--no-commit') {
+			$args['no_commit'] = true;
 			continue;
 		}
 		if ($k === '--no-merge') {
@@ -163,10 +173,12 @@ function parseArgs(array $argv): array {
 	if (!empty($args['help'])) {
 		$help = <<<TXT
 Uso:
-  php tools/bump-with-issue.php --issue <N> [--no-merge] [--no-tag] [--release] [--init-labels]
+  php tools/bump-with-issue.php --issue <N> [--plan] [--no-commit] [--no-merge] [--no-tag] [--release] [--init-labels]
 
 Note:
   - richiede una label bump sulla issue: major|minor|patch
+  - --plan: non modifica il repo, stampa solo bump/target version
+  - --no-commit: applica le modifiche ai file ma si ferma prima di commit/push/PR
   - default: merge squash + tag vX.Y.Z (no release). Usa --release per creare anche release.
 TXT;
 		fwrite(STDOUT, $help . "\n");
@@ -766,6 +778,11 @@ try {
 	$nextVersion = bumpVersion($currentVersion, $bump);
 		info("Bump: $bump ($currentVersion -> $nextVersion)");
 
+		if (!empty($args['plan'])) {
+			info("Stop (--plan). Nessuna modifica applicata.");
+			exit(0);
+		}
+
 		git('checkout -B ' . escapeshellarg($branch));
 
 		// Se avevamo modifiche locali (stash), applicale sul branch della issue:
@@ -784,6 +801,11 @@ try {
 	ensureChangelogInReadme($readmePath);
 	prependChangelogEntry($readmePath, $nextVersion, $date, $issueNum, $issueTitle);
 	updateWpReadmeTxt($wpReadmeTxtPath, $currentVersion, $nextVersion, $date, $issueNum, $issueTitle);
+
+	if (!empty($args['no_commit'])) {
+		info("Stop (--no-commit). Modifiche applicate ai file, nessun commit/push/PR.");
+		exit(0);
+	}
 
 	// Commit
 	git('add -A');

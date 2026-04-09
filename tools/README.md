@@ -13,8 +13,10 @@ Script principali:
 - `tools/bump-with-issue.php`  
   Bump semver + aggiornamento header plugin (`pbs.php`) + changelog in `README.md`.
   Richiede `git` e `gh` configurati.
+  Modalità:
+  - `--plan` (solo piano, nessuna modifica)
+  - `--no-commit` (modifica file ma non commit/push/PR)
 
 Note:
 - Per PBS, il file plugin di default è `pbs.php` (override con env `PLUGIN_MAIN`).
 - I default repo/branch sono impostati nello script ma possono essere sovrascritti con env.
-
