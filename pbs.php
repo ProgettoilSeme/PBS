@@ -2,7 +2,8 @@
 /**
  * Plugin Name: PBS (Power Bridge SQL)
  * Description: Generatore on-demand di servizi gLib-compliant a partire da schema dati (manuale o da CPT/ACF).
- * Version: 0.0.0
+ * Version: 0.0.1
+ * Released: 9 apr 2026
  * Author: Giorgio
  */
 
