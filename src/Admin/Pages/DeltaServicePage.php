@@ -10,10 +10,24 @@ use PBS\Services\GlibScanner;
 use PBS\Services\GlibServiceScanner;
 use PBS\Services\ServiceDelta;
 
+/**
+ * Admin page: PBS → Delta servizio.
+ *
+ * Permette di selezionare:
+ * - schema PBS
+ * - plugin target + gLib dir + servizio
+ *
+ * E poi:
+ * - analizzare il delta (added/removed/changed) con warning + SQL suggeriti
+ * - applicare update “solo mapping” sul Base*.php del servizio (no auto DB changes)
+ */
 final class DeltaServicePage
 {
     private static ?self $instance = null;
 
+    /**
+     * Singleton instance.
+     */
     public static function instance(): self
     {
         if (!self::$instance instanceof self) {
@@ -22,12 +36,18 @@ final class DeltaServicePage
         return self::$instance;
     }
 
+    /**
+     * Register admin-post handlers.
+     */
     public function register_actions(): void
     {
         add_action('admin_post_pbs_delta_analyze', [$this, 'handle_analyze']);
         add_action('admin_post_pbs_delta_apply', [$this, 'handle_apply']);
     }
 
+    /**
+     * Render page.
+     */
     public function render(): void
     {
         if (!current_user_can('manage_options')) {

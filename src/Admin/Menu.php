@@ -11,10 +11,18 @@ use PBS\Admin\Pages\DeltaServicePage;
 use PBS\Admin\Pages\SchemasPage;
 use PBS\Admin\Pages\SchemaFieldsPage;
 
+/**
+ * Admin menu registry for PBS.
+ *
+ * Registra le voci di menu e inizializza le pagine (register_actions).
+ */
 final class Menu
 {
     private static ?self $instance = null;
 
+    /**
+     * Singleton instance.
+     */
     public static function instance(): self
     {
         if (!self::$instance instanceof self) {
@@ -23,6 +31,9 @@ final class Menu
         return self::$instance;
     }
 
+    /**
+     * Register admin hooks and page actions.
+     */
     public function register(): void
     {
         add_action('admin_menu', [$this, 'register_menu']);
@@ -34,6 +45,9 @@ final class Menu
         DeltaServicePage::instance()->register_actions();
     }
 
+    /**
+     * Register admin menu + submenus.
+     */
     public function register_menu(): void
     {
         $cap = 'manage_options';

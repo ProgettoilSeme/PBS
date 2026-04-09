@@ -19,6 +19,8 @@ namespace PBS\Services;
 final class ComponentRegistry
 {
     /**
+     * Lista componenti standard (kinds) con i members attesi.
+     *
      * @return array<string,array{
      *   label:string,
      *   members:array<string,array{label:string,field_type:string}>
@@ -56,6 +58,9 @@ final class ComponentRegistry
         return $kind !== '' && isset(self::components()[$kind]);
     }
 
+    /**
+     * Normalizza un kind: se vuoto -> `generic`.
+     */
     public static function normalize_group_kind(string $kind): string
     {
         $kind = sanitize_key($kind);
@@ -82,6 +87,9 @@ final class ComponentRegistry
         return $k;
     }
 
+    /**
+     * Inferisce il tipo PBS di un member, usando prima il registry e poi un fallback ACF->PBS.
+     */
     public static function infer_member_type(string $groupKind, string $memberKey, string $acfType): string
     {
         $groupKind = sanitize_key($groupKind);
@@ -105,4 +113,3 @@ final class ComponentRegistry
         };
     }
 }
-

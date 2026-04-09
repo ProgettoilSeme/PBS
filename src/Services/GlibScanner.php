@@ -4,6 +4,14 @@ declare(strict_types=1);
 
 namespace PBS\Services;
 
+/**
+ * GlibScanner
+ *
+ * Scansiona plugin WordPress per rilevare directory gLib:
+ * - `gLib/` oppure `gLib_fNN/`
+ *
+ * Produce un report “best-effort” (blockers/warnings) per guidare la compatibilità.
+ */
 final class GlibScanner
 {
     /**

@@ -9,10 +9,18 @@ use PBS\Repository\FieldRepository;
 use PBS\Repository\GenerationRepository;
 use PBS\Services\PluginGenerator;
 
+/**
+ * Admin page: PBS → Genera plugin.
+ *
+ * Genera un nuovo plugin gLib-compliant (light) a partire dallo schema PBS selezionato.
+ */
 final class GeneratePage
 {
     private static ?self $instance = null;
 
+    /**
+     * Singleton instance.
+     */
     public static function instance(): self
     {
         if (!self::$instance instanceof self) {
@@ -21,11 +29,17 @@ final class GeneratePage
         return self::$instance;
     }
 
+    /**
+     * Register admin-post handler for generation.
+     */
     public function register_actions(): void
     {
         add_action('admin_post_pbs_generate_plugin', [$this, 'handle_generate']);
     }
 
+    /**
+     * Render page.
+     */
     public function render(): void
     {
         if (!current_user_can('manage_options')) {
@@ -47,6 +61,9 @@ final class GeneratePage
         require PBS_PLUGIN_DIR . 'templates/admin-generate.php';
     }
 
+    /**
+     * Handler: generate plugin (on-demand).
+     */
     public function handle_generate(): void
     {
         if (!current_user_can('manage_options')) {
