@@ -92,13 +92,14 @@ if (!defined('PBS_PLUGIN_META')) {
 
     // Alias comodo per lo slug di traduzione senza underscore.
     if (defined('PBS_PLUGIN_TEXT_DOMAIN') && !defined('PBS_PLUGIN_TEXTDOMAIN')) {
-        define('PBS_PLUGIN_TEXTDOMAIN', PBS_PLUGIN_TEXT_DOMAIN);
+        define('PBS_PLUGIN_TEXTDOMAIN', (string) constant('PBS_PLUGIN_TEXT_DOMAIN'));
     }
 }
 
 // Back-compat constant used in code.
 if (!defined('PBS_VERSION')) {
-    define('PBS_VERSION', defined('PBS_PLUGIN_VERSION') ? (string) PBS_PLUGIN_VERSION : '0.0.1');
+    // Usa constant() per evitare warning statici (Intelephense) su costanti definite dinamicamente.
+    define('PBS_VERSION', defined('PBS_PLUGIN_VERSION') ? (string) constant('PBS_PLUGIN_VERSION') : '0.0.1');
 }
 
 spl_autoload_register(static function (string $class): void {
