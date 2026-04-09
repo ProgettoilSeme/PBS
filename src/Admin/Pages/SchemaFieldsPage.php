@@ -9,10 +9,21 @@ use PBS\Repository\FieldRepository;
 use PBS\Repository\GenerationRepository;
 use PBS\Services\ACFImporter;
 
+/**
+ * Admin page: PBS → Dettaglio schema (campi).
+ *
+ * Gestisce solo i campi dello schema:
+ * - TAB List/New/Edit
+ * - import ACF (policy B: gruppi + members)
+ * - split/copy member, merge field→group, creazione gruppi
+ */
 final class SchemaFieldsPage
 {
     private static ?self $instance = null;
 
+    /**
+     * Singleton instance.
+     */
     public static function instance(): self
     {
         if (!self::$instance instanceof self) {
@@ -21,6 +32,9 @@ final class SchemaFieldsPage
         return self::$instance;
     }
 
+    /**
+     * Register admin-post handlers (fields + groups + import).
+     */
     public function register_actions(): void
     {
         add_action('admin_post_pbs_field_add', [$this, 'handle_field_add']);
@@ -37,6 +51,9 @@ final class SchemaFieldsPage
         add_action('admin_post_pbs_group_member_update', [$this, 'handle_group_member_update']);
     }
 
+    /**
+     * Render page.
+     */
     public function render(): void
     {
         if (!current_user_can('manage_options')) {

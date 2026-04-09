@@ -6,10 +6,21 @@ namespace PBS\Admin\Pages;
 
 use PBS\Services\GlibScanner;
 
+/**
+ * Admin page: PBS → Check gLib.
+ *
+ * Gestisce:
+ * - whitelist plugin candidati (manuale)
+ * - scan directory gLib e report compatibilità
+ * - puntatore persistente alla gLib selezionata (plugin_slug + glib_dir)
+ */
 final class GlibCheckPage
 {
     private static ?self $instance = null;
 
+    /**
+     * Singleton instance.
+     */
     public static function instance(): self
     {
         if (!self::$instance instanceof self) {
@@ -18,6 +29,9 @@ final class GlibCheckPage
         return self::$instance;
     }
 
+    /**
+     * Register admin-post handlers.
+     */
     public function register_actions(): void
     {
         add_action('admin_post_pbs_glib_whitelist_save', [$this, 'handle_whitelist_save']);
@@ -27,6 +41,9 @@ final class GlibCheckPage
         add_action('admin_post_pbs_glib_set_pointer', [$this, 'handle_set_pointer']);
     }
 
+    /**
+     * Render page.
+     */
     public function render(): void
     {
         if (!current_user_can('manage_options')) {

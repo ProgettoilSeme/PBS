@@ -4,12 +4,29 @@ declare(strict_types=1);
 
 namespace PBS;
 
+/**
+ * PBS internal DB schema.
+ *
+ * Nota: PBS usa `dbDelta()` solo per le tabelle interne (attivazione plugin = azione esplicita).
+ */
 final class DB
 {
+    /**
+     * Schemas registry table (senza prefix WP).
+     */
     public const SCHEMAS_TABLE = 'pbs_schemas';
+    /**
+     * Schema fields table (senza prefix WP).
+     */
     public const FIELDS_TABLE = 'pbs_schema_fields';
+    /**
+     * Generations registry table (senza prefix WP).
+     */
     public const GENERATIONS_TABLE = 'pbs_generations';
 
+    /**
+     * Ensure PBS tables exist (activation hook).
+     */
     public static function ensure_schema(): void
     {
         global $wpdb;
@@ -79,4 +96,3 @@ final class DB
         );
     }
 }
-

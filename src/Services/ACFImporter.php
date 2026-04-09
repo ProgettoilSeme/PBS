@@ -4,6 +4,14 @@ declare(strict_types=1);
 
 namespace PBS\Services;
 
+/**
+ * ACFImporter
+ *
+ * Importa uno schema PBS a partire da field groups ACF (post type).
+ * Supporta:
+ * - filtro “solo elements” (ACF flexible content elements)
+ * - policy di raggruppamento B: elemento complesso → 1 gruppo (array_nested) + members
+ */
 final class ACFImporter
 {
     /**

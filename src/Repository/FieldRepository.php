@@ -6,8 +6,16 @@ namespace PBS\Repository;
 
 use PBS\DB;
 
+/**
+ * Repository: schema fields (`pbs_schema_fields`).
+ */
 final class FieldRepository
 {
+    /**
+     * Get a field by schema + id.
+     *
+     * @return array<string,mixed>|null
+     */
     public function get(int $schemaId, int $fieldId): ?array
     {
         global $wpdb;
@@ -17,6 +25,11 @@ final class FieldRepository
         return is_array($row) ? $row : null;
     }
 
+    /**
+     * List fields for a schema (ordered).
+     *
+     * @return array<int,array<string,mixed>>
+     */
     public function list_by_schema(int $schemaId): array
     {
         global $wpdb;
@@ -25,6 +38,11 @@ final class FieldRepository
         return $wpdb->get_results($wpdb->prepare("SELECT * FROM {$t} WHERE schema_id=%d ORDER BY ord ASC, id ASC", $schemaId), ARRAY_A) ?: [];
     }
 
+    /**
+     * Insert a new field.
+     *
+     * @param array<string,mixed> $data
+     */
     public function add(int $schemaId, array $data): int
     {
         global $wpdb;
@@ -48,6 +66,9 @@ final class FieldRepository
         return (int) $wpdb->insert_id;
     }
 
+    /**
+     * Delete field.
+     */
     public function delete(int $schemaId, int $fieldId): void
     {
         global $wpdb;
@@ -56,6 +77,11 @@ final class FieldRepository
         $wpdb->delete($t, ['schema_id' => $schemaId, 'id' => $fieldId], ['%d', '%d']);
     }
 
+    /**
+     * Update field.
+     *
+     * @param array<string,mixed> $data
+     */
     public function update(int $schemaId, int $fieldId, array $data): void
     {
         global $wpdb;
@@ -80,6 +106,9 @@ final class FieldRepository
         );
     }
 
+    /**
+     * Delete all fields for schema.
+     */
     public function delete_all_by_schema(int $schemaId): void
     {
         global $wpdb;
@@ -91,7 +120,6 @@ final class FieldRepository
     /**
      * Replace all fields for schema with provided normalized list.
      *
-     * @param int $schemaId
      * @param array<int,array<string,mixed>> $fields
      */
     public function replace_all(int $schemaId, array $fields): void

@@ -7,6 +7,15 @@ namespace PBS\Services;
 use PBS\Repository\FieldRepository;
 use PBS\Repository\SchemaRepository;
 
+/**
+ * ServiceDelta
+ *
+ * Calcola e applica un delta tra lo schema PBS e il mapping di un servizio esistente (Base*.php).
+ *
+ * Policy:
+ * - nessuna modifica automatica al DB
+ * - l'azione "Applica" modifica solo `match_db_inp_type` nel Base*.php (mapping)
+ */
 final class ServiceDelta
 {
     /**

@@ -4,6 +4,11 @@ declare(strict_types=1);
 
 namespace PBS\Services;
 
+/**
+ * GlibServiceScanner
+ *
+ * Elenca i servizi presenti in una gLib (directory `Api/Services/{Shared|Internal|Control}/*`).
+ */
 final class GlibServiceScanner
 {
     /**
@@ -102,4 +107,3 @@ final class GlibServiceScanner
         return '';
     }
 }
-

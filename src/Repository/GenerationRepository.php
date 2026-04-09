@@ -6,8 +6,16 @@ namespace PBS\Repository;
 
 use PBS\DB;
 
+/**
+ * Repository: generations registry (`pbs_generations`).
+ *
+ * Registra output di generazioni (plugin/service) e le versioni (schema + generation).
+ */
 final class GenerationRepository
 {
+    /**
+     * Compute next generation version for a schema.
+     */
     public function next_generation_version(int $schemaId): int
     {
         global $wpdb;
@@ -18,6 +26,11 @@ final class GenerationRepository
         return max(1, $max + 1);
     }
 
+    /**
+     * Insert a generation record.
+     *
+     * @param array<string,mixed> $data
+     */
     public function create(array $data): int
     {
         global $wpdb;
@@ -42,6 +55,9 @@ final class GenerationRepository
         return (int) $wpdb->insert_id;
     }
 
+    /**
+     * Delete all generation records for a schema.
+     */
     public function delete_all_by_schema(int $schemaId): void
     {
         global $wpdb;

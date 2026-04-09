@@ -9,10 +9,23 @@ use PBS\Repository\FieldRepository;
 use PBS\Repository\GenerationRepository;
 use PBS\Services\ACFImporter;
 
+/**
+ * Admin page: PBS → Schemi.
+ *
+ * Gestisce:
+ * - lista schemi
+ * - creazione/modifica metadati schema
+ * - help
+ *
+ * Nota: i campi dello schema sono gestiti in una pagina separata (`SchemaFieldsPage`).
+ */
 final class SchemasPage
 {
     private static ?self $instance = null;
 
+    /**
+     * Singleton instance.
+     */
     public static function instance(): self
     {
         if (!self::$instance instanceof self) {
@@ -21,6 +34,9 @@ final class SchemasPage
         return self::$instance;
     }
 
+    /**
+     * Register admin-post handlers for this page.
+     */
     public function register_actions(): void
     {
         add_action('admin_post_pbs_schema_create', [$this, 'handle_schema_create']);
@@ -28,6 +44,9 @@ final class SchemasPage
         add_action('admin_post_pbs_schema_delete', [$this, 'handle_schema_delete']);
     }
 
+    /**
+     * Render page.
+     */
     public function render(): void
     {
         if (!current_user_can('manage_options')) {

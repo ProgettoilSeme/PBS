@@ -1,0 +1,12 @@
+{
+  "autoload": {
+    "psr-4": {
+      "PBS\\": "src/"
+    }
+  },
+  "schemaAlignment": {
+    "enabled": false
+  },
+  "generator": {}
+}
+

@@ -6,10 +6,18 @@ namespace PBS;
 
 use PBS\Admin\Menu;
 
+/**
+ * PBS plugin bootstrap.
+ *
+ * PBS è un generatore on-demand: registra prevalentemente la UI admin.
+ */
 final class Plugin
 {
     private static ?self $instance = null;
 
+    /**
+     * Singleton instance.
+     */
     public static function instance(): self
     {
         if (!self::$instance instanceof self) {
@@ -18,6 +26,9 @@ final class Plugin
         return self::$instance;
     }
 
+    /**
+     * Register hooks.
+     */
     public function register(): void
     {
         // Admin UI
@@ -26,4 +37,3 @@ final class Plugin
         }
     }
 }
-

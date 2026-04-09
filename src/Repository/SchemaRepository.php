@@ -6,8 +6,18 @@ namespace PBS\Repository;
 
 use PBS\DB;
 
+/**
+ * Repository: PBS schemas (`pbs_schemas`).
+ *
+ * Tutte le query sono relative alle tabelle interne PBS (con prefix WP).
+ */
 final class SchemaRepository
 {
+    /**
+     * List schemas (most recent first).
+     *
+     * @return array<int,array<string,mixed>>
+     */
     public function list(): array
     {
         global $wpdb;
@@ -16,6 +26,11 @@ final class SchemaRepository
         return $wpdb->get_results("SELECT * FROM {$t} ORDER BY updated_at DESC", ARRAY_A) ?: [];
     }
 
+    /**
+     * Get schema by id.
+     *
+     * @return array<string,mixed>|null
+     */
     public function get(int $id): ?array
     {
         global $wpdb;
@@ -25,6 +40,11 @@ final class SchemaRepository
         return is_array($row) ? $row : null;
     }
 
+    /**
+     * Create a new schema.
+     *
+     * @param array<string,mixed> $data
+     */
     public function create(array $data): int
     {
         global $wpdb;
@@ -47,6 +67,11 @@ final class SchemaRepository
         return (int) $wpdb->insert_id;
     }
 
+    /**
+     * Update schema fields (metadata only, not fields list).
+     *
+     * @param array<string,mixed> $data
+     */
     public function update(int $id, array $data): void
     {
         global $wpdb;
@@ -78,6 +103,9 @@ final class SchemaRepository
         $wpdb->update($t, $update, ['id' => $id], $format, ['%d']);
     }
 
+    /**
+     * Bump `schema_version` and update `updated_at`.
+     */
     public function bump_version(int $id): void
     {
         global $wpdb;
@@ -86,6 +114,9 @@ final class SchemaRepository
         $wpdb->query($wpdb->prepare("UPDATE {$t} SET schema_version = schema_version + 1, updated_at=%s WHERE id=%d", current_time('mysql'), $id));
     }
 
+    /**
+     * Delete schema (does not cascade; callers are responsible for related tables cleanup).
+     */
     public function delete(int $id): void
     {
         global $wpdb;

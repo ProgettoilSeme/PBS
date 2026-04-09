@@ -4,6 +4,12 @@ declare(strict_types=1);
 
 namespace PBS\Services;
 
+/**
+ * CompatibilityValidator
+ *
+ * Valida i fields PBS prima di generare plugin/servizi o applicare update.
+ * Ritorna errori bloccanti e warning non bloccanti.
+ */
 final class CompatibilityValidator
 {
     /**
@@ -54,4 +60,3 @@ final class CompatibilityValidator
         ];
     }
 }
-

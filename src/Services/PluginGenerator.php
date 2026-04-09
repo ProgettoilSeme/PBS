@@ -7,9 +7,17 @@ namespace PBS\Services;
 use PBS\Repository\FieldRepository;
 use PBS\Repository\SchemaRepository;
 
+/**
+ * PluginGenerator
+ *
+ * Genera un nuovo plugin WordPress con gLib `gLib_fNN` (namespace incrementale)
+ * e un servizio standard derivato dallo schema PBS.
+ */
 final class PluginGenerator
 {
     /**
+     * Generate a new plugin from schema.
+     *
      * @return array{ok:bool,errors:array<int,string>,warnings:array<int,string>,output_dir?:string,glib_namespace?:string,glib_suffix?:int,files?:array<int,string>}
      */
     public function generate(int $schemaId, string $pluginSlug, string $pluginName, array $opts = []): array
@@ -121,6 +129,8 @@ final class PluginGenerator
     }
 
     /**
+     * Ensure directory exists.
+     *
      * @return array{ok:bool,errors:array<int,string>}
      */
     private function mkdir(string $dir): array

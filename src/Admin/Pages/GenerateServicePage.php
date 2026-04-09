@@ -6,10 +6,19 @@ namespace PBS\Admin\Pages;
 
 use PBS\Repository\SchemaRepository;
 
+/**
+ * Admin page: PBS → Genera servizio.
+ *
+ * (MVP) UI/config per generazione/aggancio di un servizio su gLib esistente.
+ * Le azioni di patch/apply verranno aggiunte in iterazioni successive.
+ */
 final class GenerateServicePage
 {
     private static ?self $instance = null;
 
+    /**
+     * Singleton instance.
+     */
     public static function instance(): self
     {
         if (!self::$instance instanceof self) {
@@ -18,11 +27,17 @@ final class GenerateServicePage
         return self::$instance;
     }
 
+    /**
+     * Register handlers (MVP: none).
+     */
     public function register_actions(): void
     {
         // MVP: solo UI/config. Le azioni di patch/apply saranno aggiunte in seguito.
     }
 
+    /**
+     * Render page.
+     */
     public function render(): void
     {
         if (!current_user_can('manage_options')) {
@@ -46,4 +61,3 @@ final class GenerateServicePage
         require PBS_PLUGIN_DIR . 'templates/admin-generate-service.php';
     }
 }
-

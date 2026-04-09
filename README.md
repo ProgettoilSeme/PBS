@@ -88,6 +88,9 @@ Percorsi relativi alla root del plugin `PBS/`:
 
 ## Changelog
 
+
+### v0.0.1 - 2026-04-09
+- #1: Bootstrap PBS repo: docs + tools + bump workflow
 ### 0.0.0 — 2026-04-09
 
 - Baseline PBS:
