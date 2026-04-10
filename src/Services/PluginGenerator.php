@@ -32,6 +32,7 @@ final class PluginGenerator
         }
 
         $fields = $fieldRepo->list_by_schema($schemaId);
+        $fields = $this->normalize_fields_for_generation($fields);
         $v = $validator->validate_fields($fields);
         if ($v['errors']) {
             return ['ok' => false, 'errors' => $v['errors'], 'warnings' => $v['warnings']];
@@ -118,6 +119,77 @@ final class PluginGenerator
             'glib_suffix' => $glibSuffix,
             'files' => $files,
         ];
+    }
+
+    /**
+     * Normalize fields for generation.
+     *
+     * Goal: se uno schema PBS contiene gruppi complessi con `flags.group.kind` riconosciuto
+     * (componenti standard, es. `text`, `button`), il generatore applica una normalizzazione:
+     * - key members (rimozione prefissi tipo `button_title`)
+     * - field_type coerenti col registry (bool/url/html...)
+     *
+     * In questo modo il plugin generato “traduce” i descrittori nel componente standard.
+     *
+     * @param array<int,array<string,mixed>> $fields
+     * @return array<int,array<string,mixed>>
+     */
+    private function normalize_fields_for_generation(array $fields): array
+    {
+        foreach ($fields as $i => $f) {
+            if (!is_array($f)) {
+                continue;
+            }
+            $flags = json_decode((string) ($f['flags'] ?? ''), true);
+            if (!is_array($flags) || empty($flags['group']) || !is_array($flags['group'])) {
+                continue;
+            }
+
+            $kind = sanitize_key((string) ($flags['group']['kind'] ?? ''));
+            if ($kind === '' || $kind === 'generic' || !ComponentRegistry::is_known_kind($kind)) {
+                continue;
+            }
+
+            $members = (array) ($flags['group']['members'] ?? []);
+            if (!$members) {
+                continue;
+            }
+
+            $outMembers = [];
+            foreach ($members as $m) {
+                if (!is_array($m)) {
+                    continue;
+                }
+                $rawKey = (string) ($m['key'] ?? '');
+                $normKey = ComponentRegistry::normalize_member_key($kind, $rawKey);
+                if ($normKey === '') {
+                    $normKey = sanitize_key($rawKey);
+                }
+                if ($normKey === '') {
+                    continue;
+                }
+
+                $acfType = '';
+                if (!empty($m['acf']) && is_array($m['acf']) && isset($m['acf']['type'])) {
+                    $acfType = (string) $m['acf']['type'];
+                }
+
+                $m['key'] = $normKey;
+                $m['field_type'] = ComponentRegistry::infer_member_type($kind, $normKey, $acfType);
+                if (!isset($m['label']) || (string) $m['label'] === '') {
+                    $m['label'] = $normKey;
+                }
+
+                $outMembers[] = $m;
+            }
+
+            $flags['group']['kind'] = $kind;
+            $flags['group']['members'] = $outMembers;
+            $f['flags'] = wp_json_encode($flags);
+            $fields[$i] = $f;
+        }
+
+        return $fields;
     }
 
     private function next_glib_suffix(): int
@@ -590,6 +662,7 @@ final class AdminCallbacks
         \$db = (string) (\$args['db_column'] ?? '');
         \$groupDb = (string) (\$args['group_db'] ?? '');
         \$memberKey = (string) (\$args['member_key'] ?? '');
+        \$groupKind = (string) (\$args['group_kind'] ?? '');
 
         if (\$groupDb !== '' && \$memberKey !== '') {
             \$type = (string) (\$args['type'] ?? 'text');
@@ -673,6 +746,91 @@ final class AdminCallbacks
         };
 
         echo '<input class="regular-text" type="' . esc_attr(\$htmlType) . '" name="' . esc_attr(\$name) . '" value="' . esc_attr(\$val) . '"/>';
+    }
+
+    /**
+     * Render preview for complex components (groups).
+     *
+     * args:
+     * - group_db
+     * - group_kind
+     * - group_label
+     */
+    public function componentPreviewField(array \$args): void
+    {
+        \$groupDb = (string) (\$args['group_db'] ?? '');
+        \$groupKind = (string) (\$args['group_kind'] ?? '');
+        if (\$groupDb === '' || \$groupKind === '') {
+            return;
+        }
+
+        if (\$groupKind !== 'button') {
+            return;
+        }
+
+        \$vals = [];
+        if (isset(\$this->values[\$groupDb]) && is_array(\$this->values[\$groupDb])) {
+            \$vals = (array) \$this->values[\$groupDb];
+        }
+
+        \$title = (string) (\$vals['title'] ?? '');
+        \$link = (string) (\$vals['link'] ?? '');
+        \$targetBlank = !empty(\$vals['target_blank']) && (string) \$vals['target_blank'] !== '0';
+        \$hiddenText = !empty(\$vals['hidden_text']) && (string) \$vals['hidden_text'] !== '0';
+        \$icon = (string) (\$vals['icon'] ?? '');
+
+        \$previewId = 'pbs_preview_' . sanitize_key(\$groupDb);
+        \$btnId = \$previewId . '_btn';
+        \$iconId = \$previewId . '_icon';
+
+        \$href = \$link !== '' ? \$link : '#';
+        \$tgt = \$targetBlank ? ' target=\"_blank\" rel=\"noopener\"' : '';
+        \$label = \$hiddenText ? '' : (\$title !== '' ? \$title : 'Button');
+
+        echo '<div id="' . esc_attr(\$previewId) . '" style="padding:10px 12px; background:#fff; border:1px solid #ccd0d4; border-radius:4px;">';
+        echo '<div style="margin-bottom:8px;"><strong>Anteprima bottone</strong></div>';
+        echo '<a id="' . esc_attr(\$btnId) . '" class="button button-primary" href="' . esc_url(\$href) . '"' . \$tgt . '>';
+        echo '<span id="' . esc_attr(\$iconId) . '" style="vertical-align:middle; margin-right:6px;">';
+        if (\$icon !== '') {
+            if (str_starts_with(\$icon, 'dashicons-')) {
+                echo '<span class=\"dashicons ' . esc_attr(\$icon) . '\"></span>';
+            } else {
+                echo esc_html(\$icon);
+            }
+        }
+        echo '</span>';
+        echo '<span class="pbs-btn-label">' . esc_html(\$label) . '</span>';
+        echo '</a>';
+        echo '<div class="description" style="margin-top:8px;">Questo preview è solo UI BE: i dati reali sono salvati nel payload/DB secondo lo schema PBS.</div>';
+        echo '</div>';
+
+        // Live preview JS (best-effort).
+        \$idTitle = 'pbs_' . sanitize_key(\$groupDb . '_title');
+        \$idLink = 'pbs_' . sanitize_key(\$groupDb . '_link');
+        \$idTarget = 'pbs_' . sanitize_key(\$groupDb . '_target_blank');
+        \$idHidden = 'pbs_' . sanitize_key(\$groupDb . '_hidden_text');
+        \$idIcon = 'pbs_' . sanitize_key(\$groupDb . '_icon');
+
+        echo '<script>(function(){';
+        echo 'var btn=document.getElementById(' . wp_json_encode(\$btnId) . ');';
+        echo 'if(!btn){return;}';
+        echo 'var iconWrap=document.getElementById(' . wp_json_encode(\$iconId) . ');';
+        echo 'var titleEl=document.getElementById(' . wp_json_encode(\$idTitle) . ');';
+        echo 'var linkEl=document.getElementById(' . wp_json_encode(\$idLink) . ');';
+        echo 'var targetEl=document.getElementById(' . wp_json_encode(\$idTarget) . ');';
+        echo 'var hiddenEl=document.getElementById(' . wp_json_encode(\$idHidden) . ');';
+        echo 'var iconEl=document.getElementById(' . wp_json_encode(\$idIcon) . ');';
+        echo 'function val(el){return el?el.value:\"\";}';
+        echo 'function checked(el){return !!(el && el.checked);}';
+        echo 'function setLabel(txt){var s=btn.querySelector(\".pbs-btn-label\"); if(s){s.textContent=txt;}}';
+        echo 'function renderIcon(raw){ if(!iconWrap){return;} raw=(raw||\"\").trim(); if(!raw){iconWrap.innerHTML=\"\"; return;}';
+        echo 'if(raw.indexOf(\"dashicons-\")===0){iconWrap.innerHTML=\"<span class=\\\"dashicons \"+raw+\"\\\"></span>\";} else {iconWrap.textContent=raw;} }';
+        echo 'function update(){var t=val(titleEl); var u=val(linkEl); var tb=checked(targetEl); var ht=checked(hiddenEl);';
+        echo 'btn.href = u?u:\"#\"; if(tb){btn.setAttribute(\"target\",\"_blank\"); btn.setAttribute(\"rel\",\"noopener\");} else {btn.removeAttribute(\"target\"); btn.removeAttribute(\"rel\");}';
+        echo 'setLabel(ht?\"\":(t||\"Button\")); renderIcon(val(iconEl)); }';
+        echo 'var els=[titleEl,linkEl,targetEl,hiddenEl,iconEl]; els.forEach(function(e){ if(!e){return;} e.addEventListener(\"input\",update); e.addEventListener(\"change\",update);});';
+        echo 'update();';
+        echo '})();</script>';
     }
 }
 
@@ -1316,6 +1474,23 @@ final class Admin{$serviceClass} extends Base{$serviceClass}
             \$members = (array) (\$meta['flags']['group']['members'] ?? []);
             if (!empty(\$members)) {
                 \$groupLabel = (string) (\$meta['label'] ?? \$db);
+                \$groupKind = (string) (\$meta['flags']['group']['kind'] ?? '');
+
+                // Component preview for known kinds (MVP: button)
+                if (\$groupKind === 'button') {
+                    \$fields[] = [
+                        'id' => {$svcPageSlugCode} . '_' . sanitize_key((string) \$db . '_preview'),
+                        'title' => \$groupLabel . ' — Anteprima',
+                        'callback' => [\$this->adminCallbacks, 'componentPreviewField'],
+                        'page' => {$svcPageSlugCode},
+                        'section' => {$svcPageSlugCode} . '_main',
+                        'args' => [
+                            'group_db' => (string) \$db,
+                            'group_kind' => (string) \$groupKind,
+                            'group_label' => (string) \$groupLabel,
+                        ],
+                    ];
+                }
                 foreach (\$members as \$m) {
                     if (!is_array(\$m)) {
                         continue;
@@ -1335,6 +1510,7 @@ final class Admin{$serviceClass} extends Base{$serviceClass}
                         'section' => {$svcPageSlugCode} . '_main',
                         'args' => [
                             'group_db' => (string) \$db,
+                            'group_kind' => (string) \$groupKind,
                             'member_key' => (string) \$mk,
                             'type' => \$mt,
                             'label' => \$ml,
