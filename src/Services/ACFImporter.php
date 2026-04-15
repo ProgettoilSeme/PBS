@@ -26,7 +26,7 @@ final class ACFImporter
     /**
      * Collected element definitions when $groupElements is enabled.
      *
-     * @var array<string,array{label:string,kind:string,members:array<int,array<string,mixed>>}>
+     * @var array<string,array{label:string,kind:string,members:array<int,array<string,mixed>>,sample?:array<string,mixed>}>
      */
     private array $elementGroups = [];
 
@@ -148,6 +148,7 @@ final class ACFImporter
             );
         }
 
+        $preview = [];
         if ($this->groupElements) {
             $fields = [];
             $seenByKey = [];
@@ -181,6 +182,17 @@ final class ACFImporter
                         ],
                     ],
                 ];
+
+                // Preview values (best-effort) extracted from the sample post.
+                $sample = [];
+                if (!empty($def['sample']) && is_array($def['sample'])) {
+                    $sample = (array) $def['sample'];
+                }
+                $preview[$unique] = [
+                    'kind' => (string) ($def['kind'] ?? $element),
+                    'label' => $label,
+                    'sample' => $sample,
+                ];
             }
         }
 
@@ -213,6 +225,7 @@ final class ACFImporter
         return [
             'groups' => $outGroups,
             'fields' => $fields,
+            'preview' => $preview,
         ];
     }
 
@@ -603,13 +616,13 @@ final class ACFImporter
             return;
         }
 
-        if ($this->groupElements) {
-            $element = $this->extract_element_name_from_path($path);
-            if ($element !== '') {
-                $this->append_group_member($element, $f, $path);
-                return;
+            if ($this->groupElements) {
+                $element = $this->extract_element_name_from_path($path);
+                if ($element !== '') {
+                    $this->append_group_member($element, $f, $path, $valuesCtx);
+                    return;
+                }
             }
-        }
 
         $flatName = $this->onlyElements ? $this->compose_compact_name($path, $name) : $this->compose_name($path, $name);
         $dbColumnBase = sanitize_key($flatName);
@@ -729,7 +742,7 @@ final class ACFImporter
      * @param array<string,mixed> $f
      * @param array<int,string> $path
      */
-    private function append_group_member(string $element, array $f, array $path): void
+    private function append_group_member(string $element, array $f, array $path, $valuesCtx): void
     {
         $element = sanitize_key($element);
         if ($element === '') {
@@ -760,6 +773,24 @@ final class ACFImporter
         // I mapping dei tipi per componenti noti sono centralizzati nel registry.
         $mapped = ComponentRegistry::infer_member_type($element, $memberKey, $acfType);
 
+        // De-dup members: flexible rows can repeat the same layout many times in a sample post.
+        // We want the schema definition once per element, not N copies of the same member.
+        foreach ((array) ($this->elementGroups[$element]['members'] ?? []) as $existing) {
+            if (!is_array($existing)) {
+                continue;
+            }
+            if ((string) ($existing['key'] ?? '') === $memberKey) {
+                // Keep the first occurrence (stable order), but allow to upgrade label/type if missing.
+                if ((string) ($existing['label'] ?? '') === '' && $memberLabel !== '') {
+                    $existing['label'] = $memberLabel;
+                }
+                if ((string) ($existing['field_type'] ?? '') === '' && $mapped !== '') {
+                    $existing['field_type'] = $mapped;
+                }
+                return;
+            }
+        }
+
         $this->elementGroups[$element]['members'][] = [
             'key' => $memberKey,
             'label' => $memberLabel,
@@ -771,6 +802,21 @@ final class ACFImporter
                 'orig_name' => $name,
             ],
         ];
+
+        // Capture a best-effort "real" preview value from the sample context (if provided).
+        if ($this->sampleValues !== null) {
+            $val = $this->value_for_field($valuesCtx, $name, (string) ($f['key'] ?? ''));
+            if (is_array($val) && $this->is_list($val)) {
+                // If list (multiple rows), take the first row value for preview.
+                $val = $val[0] ?? null;
+            }
+            if (!isset($this->elementGroups[$element]['sample']) || !is_array($this->elementGroups[$element]['sample'])) {
+                $this->elementGroups[$element]['sample'] = [];
+            }
+            if (!array_key_exists($memberKey, $this->elementGroups[$element]['sample'])) {
+                $this->elementGroups[$element]['sample'][$memberKey] = $val;
+            }
+        }
     }
 
     /**
