@@ -147,6 +147,11 @@ final class PluginGenerator
 
             $kind = sanitize_key((string) ($flags['group']['kind'] ?? ''));
             if ($kind === '' || $kind === 'generic' || !ComponentRegistry::is_known_kind($kind)) {
+                // Back-compat: older schemas/groups may not store `kind`.
+                // Infer it from db_column and/or member keys (registry intersection).
+                $kind = $this->infer_group_kind_from_flags($f, $flags);
+            }
+            if ($kind === '' || $kind === 'generic' || !ComponentRegistry::is_known_kind($kind)) {
                 continue;
             }
 
@@ -160,7 +165,14 @@ final class PluginGenerator
                 if (!is_array($m)) {
                     continue;
                 }
-                $rawKey = (string) ($m['key'] ?? '');
+                // Prefer original ACF field name when available (robust against corrupted `key` values).
+                $rawKey = '';
+                if (!empty($m['acf']) && is_array($m['acf']) && !empty($m['acf']['orig_name']) && is_string($m['acf']['orig_name'])) {
+                    $rawKey = (string) $m['acf']['orig_name'];
+                }
+                if ($rawKey === '') {
+                    $rawKey = (string) ($m['key'] ?? '');
+                }
                 $normKey = ComponentRegistry::normalize_member_key($kind, $rawKey);
                 if ($normKey === '') {
                     $normKey = sanitize_key($rawKey);
@@ -176,7 +188,11 @@ final class PluginGenerator
 
                 $m['key'] = $normKey;
                 $m['field_type'] = ComponentRegistry::infer_member_type($kind, $normKey, $acfType);
-                if (!isset($m['label']) || (string) $m['label'] === '') {
+                // Standardize label for known component members (keeps UI stable across ACF variants).
+                $components = ComponentRegistry::components();
+                if (isset($components[$kind]['members'][$normKey]['label'])) {
+                    $m['label'] = (string) $components[$kind]['members'][$normKey]['label'];
+                } elseif (!isset($m['label']) || (string) $m['label'] === '') {
                     $m['label'] = $normKey;
                 }
 
@@ -190,6 +206,75 @@ final class PluginGenerator
         }
 
         return $fields;
+    }
+
+    /**
+     * Infer group kind for legacy schemas that didn't persist flags.group.kind.
+     *
+     * Heuristic (MVP):
+     * - try db_column / input_name if they match a known kind
+     * - otherwise score intersection between member keys and registry members
+     *
+     * @param array<string,mixed> $fieldRow
+     * @param array<string,mixed> $flags
+     */
+    private function infer_group_kind_from_flags(array $fieldRow, array $flags): string
+    {
+        $fallbacks = [];
+        $db = sanitize_key((string) ($fieldRow['db_column'] ?? ''));
+        $in = sanitize_key((string) ($fieldRow['input_name'] ?? ''));
+        if ($db !== '') {
+            $fallbacks[] = $db;
+        }
+        if ($in !== '' && $in !== $db) {
+            $fallbacks[] = $in;
+        }
+
+        foreach ($fallbacks as $fb) {
+            if (ComponentRegistry::is_known_kind($fb)) {
+                return $fb;
+            }
+        }
+
+        $members = (array) (($flags['group']['members'] ?? []));
+        if (!$members) {
+            return '';
+        }
+
+        $memberKeys = [];
+        foreach ($members as $m) {
+            if (!is_array($m)) {
+                continue;
+            }
+            $k = sanitize_key((string) ($m['key'] ?? ''));
+            if ($k !== '') {
+                $memberKeys[$k] = true;
+            }
+        }
+        if (!$memberKeys) {
+            return '';
+        }
+
+        $bestKind = '';
+        $bestScore = 0;
+        foreach (ComponentRegistry::components() as $kind => $def) {
+            if (!is_array($def) || empty($def['members']) || !is_array($def['members'])) {
+                continue;
+            }
+            $score = 0;
+            foreach ($memberKeys as $k => $_) {
+                if (isset($def['members'][$k])) {
+                    $score++;
+                }
+            }
+            if ($score > $bestScore) {
+                $bestScore = $score;
+                $bestKind = (string) $kind;
+            }
+        }
+
+        // Require at least 2 matches to avoid accidental classification.
+        return $bestScore >= 2 ? sanitize_key($bestKind) : '';
     }
 
     private function next_glib_suffix(): int
@@ -670,6 +755,11 @@ final class AdminCallbacks
             if (isset(\$this->values[\$groupDb]) && is_array(\$this->values[\$groupDb]) && isset(\$this->values[\$groupDb][\$memberKey])) {
                 \$val = (string) \$this->values[\$groupDb][\$memberKey];
             }
+            // PBS pre-fill (default/suggestion) baked in mapping at generation time.
+            \$prefill = \$args['prefill'] ?? null;
+            if (\$val === '' && \$prefill !== null && !is_array(\$prefill)) {
+                \$val = (string) \$prefill;
+            }
             \$name = 'fields[' . \$groupDb . '][' . \$memberKey . ']';
             \$id = 'pbs_' . sanitize_key(\$groupDb . '_' . \$memberKey);
 
@@ -712,6 +802,10 @@ final class AdminCallbacks
         }
         \$type = (string) (\$args['type'] ?? 'text');
         \$val = isset(\$this->values[\$db]) ? (string) \$this->values[\$db] : '';
+        \$prefill = \$args['prefill'] ?? null;
+        if (\$val === '' && \$prefill !== null && !is_array(\$prefill)) {
+            \$val = (string) \$prefill;
+        }
         \$name = 'fields[' . \$db . ']';
 
         if (\$type === 'bool') {
@@ -772,6 +866,11 @@ final class AdminCallbacks
         if (isset(\$this->values[\$groupDb]) && is_array(\$this->values[\$groupDb])) {
             \$vals = (array) \$this->values[\$groupDb];
         }
+        \$prefill = is_array(\$args['prefill'] ?? null) ? (array) \$args['prefill'] : [];
+        if (\$prefill) {
+            // Record values override defaults.
+            \$vals = array_merge(\$prefill, \$vals);
+        }
 
         \$title = (string) (\$vals['title'] ?? '');
         \$link = (string) (\$vals['link'] ?? '');
@@ -788,7 +887,6 @@ final class AdminCallbacks
         \$label = \$hiddenText ? '' : (\$title !== '' ? \$title : 'Button');
 
         echo '<div id="' . esc_attr(\$previewId) . '" style="padding:10px 12px; background:#fff; border:1px solid #ccd0d4; border-radius:4px;">';
-        echo '<div style="margin-bottom:8px;"><strong>Anteprima bottone</strong></div>';
         echo '<a id="' . esc_attr(\$btnId) . '" class="button button-primary" href="' . esc_url(\$href) . '"' . \$tgt . '>';
         echo '<span id="' . esc_attr(\$iconId) . '" style="vertical-align:middle; margin-right:6px;">';
         if (\$icon !== '') {
@@ -831,6 +929,41 @@ final class AdminCallbacks
         echo 'var els=[titleEl,linkEl,targetEl,hiddenEl,iconEl]; els.forEach(function(e){ if(!e){return;} e.addEventListener(\"input\",update); e.addEventListener(\"change\",update);});';
         echo 'update();';
         echo '})();</script>';
+    }
+
+    /**
+     * Render a compact editor for complex components (single Settings API row).
+     *
+     * args:
+     * - group_db
+     * - group_kind
+     * - group_label
+     * - members (optional): array of member descriptors
+     */
+    public function componentEditorField(array \$args): void
+    {
+        \$groupDb = (string) (\$args['group_db'] ?? '');
+        \$groupKind = (string) (\$args['group_kind'] ?? '');
+        \$groupLabel = (string) (\$args['group_label'] ?? \$groupDb);
+        if (\$groupDb === '' || \$groupKind === '') {
+            return;
+        }
+
+        // MVP: only "button" gets a compact editor to avoid clutter.
+        if (\$groupKind !== 'button') {
+            echo '<div class=\"description\">Componente non supportato: ' . esc_html(\$groupKind) . '</div>';
+            return;
+        }
+
+        // Prodotto finale: mostra solo l'anteprima.
+        // La configurazione dettagliata (sotto-campi) non deve esistere nel plugin generato.
+        \$this->componentPreviewField([
+            'group_db' => \$groupDb,
+            'group_kind' => \$groupKind,
+            'group_label' => \$groupLabel,
+            'prefill' => is_array(\$args['prefill'] ?? null) ? (array) \$args['prefill'] : [],
+        ]);
+        echo '<p class=\"description\" style=\"margin-top:8px;\">Configurazione componente gestita in PBS (non nel plugin generato).</p>';
     }
 }
 
@@ -1301,6 +1434,7 @@ class Base{$serviceClass} extends BaseController
             return 0;
         }
         \$data = \$this->sanitize_payload(\$this->match_db_inp_type, \$raw);
+        \$data = \$this->apply_mirrors(\$raw, \$data);
 
         // timestamps
         \$now = current_time('mysql');
@@ -1323,6 +1457,64 @@ class Base{$serviceClass} extends BaseController
             return 0;
         }
         return (int) \$wpdb->insert_id;
+    }
+
+    /**
+     * Apply one-way mirrors (nested -> flat columns).
+     *
+     * Mirror columns are derived values used for SQL/index/search/payload-light.
+     * Canonical data remains in the nested group column.
+     *
+     * @param array<string,mixed> \$raw   Raw input (POST/payload)
+     * @param array<string,mixed> \$data  Sanitized db-ready data
+     * @return array<string,mixed>
+     */
+    protected function apply_mirrors(array \$raw, array \$data): array
+    {
+        foreach (\$this->match_db_inp_type as \$db => \$meta) {
+            \$flags = (array) (\$meta['flags'] ?? []);
+            \$mirror = \$flags['mirror'] ?? null;
+            if (!is_array(\$mirror)) {
+                continue;
+            }
+            if ((string) (\$mirror['mode'] ?? '') !== 'one_way') {
+                continue;
+            }
+            \$src = (array) (\$mirror['source'] ?? []);
+            \$groupDb = sanitize_key((string) (\$src['group_db'] ?? ''));
+            \$memberKey = sanitize_key((string) (\$src['member_key'] ?? ''));
+            if (\$groupDb === '' || \$memberKey === '') {
+                continue;
+            }
+
+            \$val = null;
+            if (isset(\$raw[\$groupDb])) {
+                \$v = \$raw[\$groupDb];
+                if (is_string(\$v)) {
+                    \$decoded = json_decode(\$v, true);
+                    \$v = is_array(\$decoded) ? \$decoded : null;
+                }
+                if (is_array(\$v) && array_key_exists(\$memberKey, \$v)) {
+                    \$val = \$v[\$memberKey];
+                }
+            }
+
+            // fallback: try from already-encoded group column
+            if (\$val === null && isset(\$data[\$groupDb]) && is_string(\$data[\$groupDb])) {
+                \$decoded = json_decode((string) \$data[\$groupDb], true);
+                if (is_array(\$decoded) && array_key_exists(\$memberKey, \$decoded)) {
+                    \$val = \$decoded[\$memberKey];
+                }
+            }
+
+            if (\$val === null) {
+                continue;
+            }
+
+            \$type = (string) (\$meta['type'] ?? 'text');
+            \$data[\$db] = \$this->sanitize_value(\$type, \$val);
+        }
+        return \$data;
     }
 
     /**
@@ -1471,31 +1663,84 @@ final class Admin{$serviceClass} extends Base{$serviceClass}
         ];
         \$fields = [];
         foreach (\$this->match_db_inp_type as \$db => \$meta) {
+            \$flags = (array) (\$meta['flags'] ?? []);
+            \$flow = (array) (\$flags['flow'] ?? []);
+            \$showBe = array_key_exists('be', \$flow) ? (bool) \$flow['be'] : true;
+            if (!empty(\$flags['hidden']) || !\$showBe || !empty(\$flags['mirror'])) {
+                continue;
+            }
+
             \$members = (array) (\$meta['flags']['group']['members'] ?? []);
             if (!empty(\$members)) {
                 \$groupLabel = (string) (\$meta['label'] ?? \$db);
                 \$groupKind = (string) (\$meta['flags']['group']['kind'] ?? '');
 
-                // Component preview for known kinds (MVP: button)
-                if (\$groupKind === 'button') {
-                    \$fields[] = [
-                        'id' => {$svcPageSlugCode} . '_' . sanitize_key((string) \$db . '_preview'),
-                        'title' => \$groupLabel . ' — Anteprima',
-                        'callback' => [\$this->adminCallbacks, 'componentPreviewField'],
+                // Text-like components: render a single main editor (hide internal members like boxtext).
+                if (in_array(\$groupKind, ['text', 'title_text'], true)) {
+                    \$mainKey = '';
+                    \$mainType = 'text';
+                    foreach (\$members as \$m) {
+                        if (!is_array(\$m)) {
+                            continue;
+                        }
+                        \$mk2 = (string) (\$m['key'] ?? '');
+                        if (\$mk2 === '') {
+                            continue;
+                        }
+                        \$mt2 = (string) (\$m['field_type'] ?? 'text');
+                        if (\$mainKey === '') {
+                            \$mainKey = \$mk2;
+                            \$mainType = \$mt2;
+                        }
+                        if (\$mt2 === 'html') {
+                            \$mainKey = \$mk2;
+                            \$mainType = \$mt2;
+                            break;
+                        }
+                    }
+                    if (\$mainKey !== '') {
+                        \$fields[] = [
+                            'id' => {$svcPageSlugCode} . '_' . sanitize_key((string) \$db . '_' . (string) \$mainKey),
+                            'title' => \$groupLabel,
+                            'callback' => [\$this->adminCallbacks, 'inputField'],
+                            'page' => {$svcPageSlugCode},
+                            'section' => {$svcPageSlugCode} . '_main',
+                            'args' => [
+                                'group_db' => (string) \$db,
+                                'group_kind' => (string) \$groupKind,
+                                'member_key' => (string) \$mainKey,
+                                'type' => (string) \$mainType,
+                                'label' => (string) \$groupLabel,
+                                'prefill' => is_array((\$flags['prefill'] ?? null)) ? (string) ((\$flags['prefill'] ?? [])[\$mainKey] ?? '') : '',
+                            ],
+                        ];
+                        continue;
+                    }
+                }
+
+	                // Compact editor for known complex kinds (MVP: button)
+	                if (\$groupKind === 'button') {
+	                    \$fields[] = [
+                        'id' => {$svcPageSlugCode} . '_' . sanitize_key((string) \$db),
+                        'title' => \$groupLabel,
+                        'callback' => [\$this->adminCallbacks, 'componentEditorField'],
                         'page' => {$svcPageSlugCode},
                         'section' => {$svcPageSlugCode} . '_main',
                         'args' => [
                             'group_db' => (string) \$db,
                             'group_kind' => (string) \$groupKind,
                             'group_label' => (string) \$groupLabel,
+                            'members' => \$members,
+                            'prefill' => is_array((\$flags['prefill'] ?? null)) ? (array) (\$flags['prefill'] ?? []) : [],
                         ],
                     ];
+                    continue;
                 }
-                foreach (\$members as \$m) {
-                    if (!is_array(\$m)) {
-                        continue;
-                    }
-                    \$mk = (string) (\$m['key'] ?? '');
+	                foreach (\$members as \$m) {
+	                    if (!is_array(\$m)) {
+	                        continue;
+	                    }
+	                    \$mk = (string) (\$m['key'] ?? '');
                     if (\$mk === '') {
                         continue;
                     }
@@ -1514,6 +1759,7 @@ final class Admin{$serviceClass} extends Base{$serviceClass}
                             'member_key' => (string) \$mk,
                             'type' => \$mt,
                             'label' => \$ml,
+                            'prefill' => is_array((\$flags['prefill'] ?? null)) ? (string) ((\$flags['prefill'] ?? [])[\$mk] ?? '') : '',
                         ],
                     ];
                 }
@@ -1530,6 +1776,7 @@ final class Admin{$serviceClass} extends Base{$serviceClass}
                     'db_column' => (string) \$db,
                     'type' => (string) (\$meta['type'] ?? 'text'),
                     'label' => (string) (\$meta['label'] ?? \$db),
+                    'prefill' => !is_array((\$flags['prefill'] ?? null)) ? (string) (\$flags['prefill'] ?? '') : '',
                 ],
             ];
         }

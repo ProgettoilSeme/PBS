@@ -9,8 +9,8 @@ Obiettivo concettuale e specifica: vedere `main.md`.
 
 ## Versione
 
-- Versione plugin: `0.0.1`
-- Data: `2026-04-09`
+- Versione plugin: `0.0.2`
+- Data: `2026-04-15`
 
 ---
 
@@ -89,6 +89,9 @@ Percorsi relativi alla root del plugin `PBS/`:
 ## Changelog
 
 
+
+### v0.0.2 - 2026-04-15
+- #3: Fix: pre-fill (Preview) + traduzione UI Text/Button nel plugin generato (delta incluso)
 ### v0.0.1 - 2026-04-09
 - #1: Bootstrap PBS repo: docs + tools + bump workflow
 ### 0.0.0 — 2026-04-09

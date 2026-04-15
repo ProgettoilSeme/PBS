@@ -49,6 +49,7 @@ final class SchemaFieldsPage
         add_action('admin_post_pbs_group_add_member', [$this, 'handle_group_add_member']);
         add_action('admin_post_pbs_group_create', [$this, 'handle_group_create']);
         add_action('admin_post_pbs_group_member_update', [$this, 'handle_group_member_update']);
+        add_action('admin_post_pbs_schema_prefill_save', [$this, 'handle_schema_prefill_save']);
     }
 
     /**
@@ -156,12 +157,19 @@ final class SchemaFieldsPage
             exit;
         }
 
-        (new FieldRepository())->update($schemaId, $fieldId, [
+        $fieldRepo = new FieldRepository();
+        $existing = $fieldRepo->get($schemaId, $fieldId);
+        $existingFlags = is_array($existing) ? (json_decode((string) ($existing['flags'] ?? ''), true) ?: []) : [];
+        $incomingFlags = $this->flags_from_post();
+
+        $mergedFlags = $this->merge_flags_for_update($existingFlags, $incomingFlags);
+
+        $fieldRepo->update($schemaId, $fieldId, [
             'db_column' => $dbColumn,
             'input_name' => $inputName,
             'label' => $label,
             'field_type' => $type,
-            'flags' => $this->flags_from_post(),
+            'flags' => $mergedFlags,
         ]);
 
         (new SchemaRepository())->bump_version($schemaId);
@@ -177,8 +185,11 @@ final class SchemaFieldsPage
         }
         check_admin_referer('pbs_field_delete');
 
-        $schemaId = (int) ($_POST['schema_id'] ?? 0);
-        $fieldId = (int) ($_POST['field_id'] ?? 0);
+        // Support both POST (forms) and GET (nonce links).
+        $schemaId = (int) ($_REQUEST['schema_id'] ?? 0);
+        $fieldId = (int) ($_REQUEST['field_id'] ?? 0);
+        $returnTab = sanitize_key((string) ($_REQUEST['return_tab'] ?? ''));
+        $postId = (int) ($_REQUEST['post_id'] ?? 0);
         if ($schemaId <= 0 || $fieldId <= 0) {
             wp_safe_redirect(add_query_arg(['page' => 'pbs-schema-fields'], admin_url('admin.php')));
             exit;
@@ -187,7 +198,14 @@ final class SchemaFieldsPage
         (new FieldRepository())->delete($schemaId, $fieldId);
         (new SchemaRepository())->bump_version($schemaId);
 
-        wp_safe_redirect(add_query_arg(['page' => 'pbs-schema-fields', 'schema_id' => $schemaId, 'pbs_ok' => 'field_deleted'], admin_url('admin.php')));
+        $args = ['page' => 'pbs-schema-fields', 'schema_id' => $schemaId, 'pbs_ok' => 'field_deleted'];
+        if (in_array($returnTab, ['schema', 'preview', 'list', 'new', 'edit', 'help'], true)) {
+            $args['tab'] = $returnTab;
+        }
+        if ($returnTab === 'preview' && $postId > 0) {
+            $args['post_id'] = $postId;
+        }
+        wp_safe_redirect(add_query_arg($args, admin_url('admin.php')));
         exit;
     }
 
@@ -275,6 +293,16 @@ final class SchemaFieldsPage
                     120
                 );
             }
+
+            // PBS Preview: store per-schema preview (component samples) to render a CPT-like view.
+            // TTL is longer because it's used interactively while refining the schema.
+            $uid = (int) get_current_user_id();
+            $schemaPreview = [
+                'post_id' => $samplePostId,
+                'post_title' => $samplePostId > 0 ? (string) get_the_title($samplePostId) : '',
+                'components' => (array) ($result['preview'] ?? []),
+            ];
+            set_transient('pbs_schema_preview_' . $schemaId . '_' . $uid, $schemaPreview, 3600);
         }
 
         if (empty($result['fields'])) {
@@ -301,6 +329,128 @@ final class SchemaFieldsPage
         // No fields found: guide debugging.
         wp_safe_redirect(add_query_arg(['page' => 'pbs-schema-fields', 'schema_id' => $schemaId, 'pbs_err' => 'acf_no_fields'], admin_url('admin.php')));
         exit;
+    }
+
+    /**
+     * Save "pre-fill" defaults/suggestions for the schema (does not modify CPT/ACF values).
+     *
+     * Stores values inside field flags as:
+     * - group field: flags.prefill = {memberKey: value, ...}
+     * - simple field: flags.prefill = scalar value
+     */
+    public function handle_schema_prefill_save(): void
+    {
+        if (!current_user_can('manage_options')) {
+            wp_die('Not allowed.');
+        }
+        check_admin_referer('pbs_schema_prefill_save');
+
+        $schemaId = (int) ($_POST['schema_id'] ?? 0);
+        $postId = (int) ($_POST['post_id'] ?? 0);
+        if ($schemaId <= 0) {
+            wp_safe_redirect(add_query_arg(['page' => 'pbs-schema-fields'], admin_url('admin.php')));
+            exit;
+        }
+
+        $fieldRepo = new FieldRepository();
+        $schemaRepo = new SchemaRepository();
+        $fields = $fieldRepo->list_by_schema($schemaId);
+
+        $groupPrefill = $_POST['prefill'] ?? [];
+        $simplePrefill = $_POST['prefill_field'] ?? [];
+
+        foreach ($fields as $f) {
+            if (!is_array($f)) {
+                continue;
+            }
+            $db = (string) ($f['db_column'] ?? '');
+            if ($db === '') {
+                continue;
+            }
+
+            $flags = json_decode((string) ($f['flags'] ?? ''), true) ?: [];
+            $isGroup = !empty($flags['group']) && is_array($flags['group']);
+
+            if ($isGroup && isset($groupPrefill[$db]) && is_array($groupPrefill[$db])) {
+                $members = (array) ($flags['group']['members'] ?? []);
+                $typesByKey = [];
+                foreach ($members as $m) {
+                    if (!is_array($m)) {
+                        continue;
+                    }
+                    $k = sanitize_key((string) ($m['key'] ?? ''));
+                    if ($k === '') {
+                        continue;
+                    }
+                    $typesByKey[$k] = (string) ($m['field_type'] ?? 'text');
+                }
+
+                $pref = [];
+                foreach ((array) $groupPrefill[$db] as $k => $v) {
+                    $k = sanitize_key((string) $k);
+                    if ($k === '') {
+                        continue;
+                    }
+                    $t = $typesByKey[$k] ?? 'text';
+                    $pref[$k] = $this->sanitize_prefill_value($t, $v);
+                }
+
+                $flags['prefill'] = $pref;
+                $fieldRepo->update($schemaId, (int) $f['id'], [
+                    'db_column' => (string) ($f['db_column'] ?? ''),
+                    'input_name' => (string) ($f['input_name'] ?? ''),
+                    'label' => (string) ($f['label'] ?? ''),
+                    'field_type' => (string) ($f['field_type'] ?? 'array_nested'),
+                    'flags' => $flags,
+                ]);
+                continue;
+            }
+
+            if (!$isGroup && isset($simplePrefill[$db])) {
+                $t = (string) ($f['field_type'] ?? 'text');
+                $flags['prefill'] = $this->sanitize_prefill_value($t, $simplePrefill[$db]);
+                $fieldRepo->update($schemaId, (int) $f['id'], [
+                    'db_column' => (string) ($f['db_column'] ?? ''),
+                    'input_name' => (string) ($f['input_name'] ?? ''),
+                    'label' => (string) ($f['label'] ?? ''),
+                    'field_type' => (string) ($f['field_type'] ?? 'text'),
+                    'flags' => $flags,
+                ]);
+            }
+        }
+
+        $schemaRepo->bump_version($schemaId);
+
+        wp_safe_redirect(add_query_arg([
+            'page' => 'pbs-schema-fields',
+            'schema_id' => $schemaId,
+            'tab' => 'preview',
+            'post_id' => $postId > 0 ? $postId : null,
+            'pbs_ok' => 'prefill_saved',
+        ], admin_url('admin.php')));
+        exit;
+    }
+
+    /**
+     * @param mixed $value
+     * @return mixed
+     */
+    private function sanitize_prefill_value(string $type, $value)
+    {
+        if (is_array($value)) {
+            return $value;
+        }
+        $value = (string) ($value ?? '');
+        return match ($type) {
+            'url' => esc_url_raw($value),
+            'email' => sanitize_email($value),
+            'html' => wp_kses_post($value),
+            'text_area' => sanitize_textarea_field($value),
+            'int' => (int) $value,
+            'float' => (float) $value,
+            'bool' => (!empty($value) && $value !== '0') ? 1 : 0,
+            default => sanitize_text_field($value),
+        };
     }
 
     /**
@@ -421,6 +571,10 @@ final class SchemaFieldsPage
         if ($returnTab === 'edit') {
             $redir['tab'] = 'edit';
             $redir['field_id'] = $groupFieldId;
+        } elseif ($returnTab === 'preview') {
+            $redir['tab'] = 'preview';
+        } elseif ($returnTab === 'schema') {
+            $redir['tab'] = 'schema';
         } else {
             $redir['tab'] = 'list';
         }
@@ -498,11 +652,27 @@ final class SchemaFieldsPage
             $type = 'text';
         }
 
+        // Mirror policy (default): one-way nested -> mirror (mirror is derived, not authoritative).
+        // Purpose: keep a flat column for SQL index/search/payload-light, without breaking the typed component.
         $newFlags = [
             'backend' => false,
-            'hidden' => false,
-            'readonly' => false,
+            'hidden' => true,
+            'readonly' => true,
             'serialized' => false,
+            'flow' => [
+                'be' => false,          // not shown in BE forms by default
+                'payload_in' => false,  // not accepted from payload by default
+                'payload_out' => true,  // can be exposed (optional) if needed for FE/search
+            ],
+            'mirror' => [
+                'mode' => 'one_way',
+                'source' => [
+                    'group_field_id' => $groupFieldId,
+                    'group_db' => $groupDb,
+                    'member_key' => $memberKey,
+                    'path' => $groupDb . '.' . $memberKey,
+                ],
+            ],
             'origin' => [
                 'from_group' => $groupFieldId,
                 'group_db' => $groupDb,
@@ -533,6 +703,10 @@ final class SchemaFieldsPage
         if ($returnTab === 'edit') {
             $redir['tab'] = 'edit';
             $redir['field_id'] = $newId;
+        } elseif ($returnTab === 'preview') {
+            $redir['tab'] = 'preview';
+        } elseif ($returnTab === 'schema') {
+            $redir['tab'] = 'schema';
         } else {
             $redir['tab'] = 'list';
         }
@@ -632,6 +806,8 @@ final class SchemaFieldsPage
         if ($returnTab === 'edit') {
             $redir['tab'] = 'edit';
             $redir['field_id'] = $groupFieldId;
+        } elseif ($returnTab === 'schema') {
+            $redir['tab'] = 'schema';
         } else {
             $redir['tab'] = 'list';
         }
@@ -678,6 +854,11 @@ final class SchemaFieldsPage
                 'hidden' => false,
                 'readonly' => false,
                 'serialized' => true,
+                'flow' => [
+                    'be' => true,
+                    'payload_in' => true,
+                    'payload_out' => true,
+                ],
                 'group' => [
                     'kind' => 'generic',
                     'mode' => 'payload',
@@ -742,11 +923,41 @@ final class SchemaFieldsPage
 
     private function flags_from_post(): array
     {
+        $flowBe = isset($_POST['flag_flow_be']) ? !empty($_POST['flag_flow_be']) : true;
+        $flowIn = isset($_POST['flag_flow_payload_in']) ? !empty($_POST['flag_flow_payload_in']) : true;
+        $flowOut = isset($_POST['flag_flow_payload_out']) ? !empty($_POST['flag_flow_payload_out']) : true;
+
         return [
             'backend' => !empty($_POST['flag_backend']),
             'hidden' => !empty($_POST['flag_hidden']),
             'readonly' => !empty($_POST['flag_readonly']),
             'serialized' => !empty($_POST['flag_serialized']),
+            'flow' => [
+                'be' => $flowBe,
+                'payload_in' => $flowIn,
+                'payload_out' => $flowOut,
+            ],
         ];
+    }
+
+    /**
+     * Merge flags for field update to avoid dropping group/mirror/acf metadata.
+     *
+     * @param array<string,mixed> $existing
+     * @param array<string,mixed> $incoming
+     * @return array<string,mixed>
+     */
+    private function merge_flags_for_update(array $existing, array $incoming): array
+    {
+        // Preserve structural metadata.
+        $preserveKeys = ['group', 'acf', 'origin', 'mirror'];
+        foreach ($preserveKeys as $k) {
+            if (isset($existing[$k]) && !isset($incoming[$k])) {
+                $incoming[$k] = $existing[$k];
+            }
+        }
+
+        // Preserve unknown keys (forward compatibility), but allow incoming to overwrite.
+        return array_replace_recursive($existing, $incoming);
     }
 }
