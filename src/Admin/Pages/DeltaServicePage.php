@@ -43,6 +43,7 @@ final class DeltaServicePage
     {
         add_action('admin_post_pbs_delta_analyze', [$this, 'handle_analyze']);
         add_action('admin_post_pbs_delta_apply', [$this, 'handle_apply']);
+        add_action('admin_post_pbs_delta_drop_table', [$this, 'handle_drop_table']);
     }
 
     /**
@@ -103,6 +104,17 @@ final class DeltaServicePage
             delete_transient('pbs_last_delta_result_' . get_current_user_id());
         }
 
+        $tablesNotice = null;
+        if (!empty($_GET['pbs_tables_notice'])) {
+            $tablesNotice = get_transient('pbs_delta_tables_notice_' . get_current_user_id());
+            delete_transient('pbs_delta_tables_notice_' . get_current_user_id());
+        }
+
+        $tables = [];
+        if ($pluginSlug !== '' && $glibFullDir !== '') {
+            $tables = $this->list_service_tables($services);
+        }
+
         require PBS_PLUGIN_DIR . 'templates/admin-delta-service.php';
     }
 
@@ -159,6 +171,96 @@ final class DeltaServicePage
         ], admin_url('admin.php')));
         exit;
     }
+
+    public function handle_drop_table(): void
+    {
+        if (!current_user_can('manage_options')) {
+            wp_die('Not allowed.');
+        }
+        check_admin_referer('pbs_delta_drop_table');
+
+        $schemaId = (int) ($_POST['schema_id'] ?? 0);
+        $pluginSlug = sanitize_text_field((string) ($_POST['plugin_slug'] ?? ''));
+        $glibDir = sanitize_text_field((string) ($_POST['glib_dir'] ?? ''));
+        $serviceKey = sanitize_key((string) ($_POST['service_key'] ?? ''));
+        $tableKey = sanitize_key((string) ($_POST['table_key'] ?? ''));
+
+        $ok = false;
+        $msg = '';
+
+        if ($pluginSlug === '' || $glibDir === '' || $tableKey === '') {
+            $msg = 'Parametri mancanti.';
+        } else {
+            $scanner = new GlibScanner();
+            $row = $scanner->scan_one($pluginSlug);
+            $glibFullDir = '';
+            foreach ((array) ($row['glib_dirs'] ?? []) as $gd) {
+                if (is_array($gd) && (string) ($gd['dir'] ?? '') === $glibDir) {
+                    $glibFullDir = (string) ($gd['full_dir'] ?? '');
+                    break;
+                }
+            }
+
+            if ($glibFullDir === '' || !is_dir($glibFullDir)) {
+                $msg = 'gLib non trovata.';
+            } else {
+                $svcScanner = new GlibServiceScanner();
+                $services = $svcScanner->list_services($glibFullDir);
+
+                // Whitelist: allow drop only for tables declared by Base*.php in this gLib.
+                $allowed = [];
+                foreach ($services as $svc) {
+                    if (!is_array($svc)) {
+                        continue;
+                    }
+                    $baseFile = (string) ($svc['base_file'] ?? '');
+                    if ($baseFile === '' || !is_file($baseFile)) {
+                        continue;
+                    }
+                    $php = (string) @file_get_contents($baseFile);
+                    if ($php === '') {
+                        continue;
+                    }
+                    $k = $this->extract_table_key($php);
+                    if ($k !== '') {
+                        $allowed[$k] = true;
+                    }
+                }
+
+                if (!isset($allowed[$tableKey])) {
+                    $msg = 'Tabella non consentita (table_key non riconosciuta per questa gLib).';
+                } else {
+                    global $wpdb;
+                    $tableName = $wpdb->prefix . $tableKey;
+                    $safe = str_replace('`', '', $tableName);
+                    // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.PreparedSQL.NotPrepared
+                    $r = $wpdb->query("DROP TABLE IF EXISTS `{$safe}`");
+                    if ($r === false) {
+                        $msg = $wpdb->last_error !== '' ? $wpdb->last_error : 'DROP fallito.';
+                    } else {
+                        $ok = true;
+                        $msg = 'Tabella droppata: ' . $safe;
+                    }
+                }
+            }
+        }
+
+        set_transient('pbs_delta_tables_notice_' . get_current_user_id(), [
+            'ok' => $ok,
+            'message' => $msg,
+        ], 60);
+
+        wp_safe_redirect(add_query_arg([
+            'page' => 'pbs-delta-service',
+            'schema_id' => $schemaId,
+            'plugin_slug' => $pluginSlug,
+            'glib_dir' => $glibDir,
+            'service_key' => $serviceKey,
+            'pbs_tables_notice' => '1',
+        ], admin_url('admin.php')));
+        exit;
+    }
+
 
     /**
      * @return array{plugin_slug:string,glib_dir:string}
@@ -218,5 +320,73 @@ final class DeltaServicePage
         });
 
         return $rows;
+    }
+
+    /**
+     * @param array<int,array<string,mixed>> $services
+     * @return array<int,array{service_key:string,service_label:string,table_key:string,table_name:string,exists:bool,rows:int|null}>
+     */
+    private function list_service_tables(array $services): array
+    {
+        global $wpdb;
+
+        $out = [];
+        foreach ($services as $svc) {
+            if (!is_array($svc)) {
+                continue;
+            }
+            $baseFile = (string) ($svc['base_file'] ?? '');
+            if ($baseFile === '' || !is_file($baseFile)) {
+                continue;
+            }
+            $php = (string) @file_get_contents($baseFile);
+            if ($php === '') {
+                continue;
+            }
+            $tableKey = $this->extract_table_key($php);
+            if ($tableKey === '') {
+                continue;
+            }
+
+            $tableName = $wpdb->prefix . $tableKey;
+            $exists = (string) $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $tableName)) === $tableName;
+
+            $rows = null;
+            if ($exists) {
+                $safe = str_replace('`', '', $tableName);
+                // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.PreparedSQL.NotPrepared
+                $cnt = $wpdb->get_var("SELECT COUNT(*) FROM `{$safe}`");
+                if ($cnt !== null && $cnt !== false) {
+                    $rows = (int) $cnt;
+                }
+            }
+
+            $group = (string) ($svc['group'] ?? '');
+            $dir = (string) ($svc['service_dir'] ?? '');
+            $serviceLabel = trim($group . ' / ' . $dir);
+
+            $out[] = [
+                'service_key' => (string) ($svc['service_key'] ?? ''),
+                'service_label' => $serviceLabel !== '' ? $serviceLabel : (string) ($svc['service_key'] ?? ''),
+                'table_key' => $tableKey,
+                'table_name' => $tableName,
+                'exists' => $exists,
+                'rows' => $rows,
+            ];
+        }
+
+        usort($out, static function (array $a, array $b): int {
+            return strcmp((string) ($a['service_label'] ?? ''), (string) ($b['service_label'] ?? ''));
+        });
+
+        return $out;
+    }
+
+    private function extract_table_key(string $php): string
+    {
+        if (preg_match('/\\bTABLE_KEY\\s*=\\s*([\\\"\\\'])([^\\\"\\\']+)\\1\\s*;/', $php, $m) === 1) {
+            return (string) ($m[2] ?? '');
+        }
+        return '';
     }
 }

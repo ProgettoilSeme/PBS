@@ -86,7 +86,7 @@ $pbsHelpTip = static function (string $text): string {
                         <td style="text-align:right; white-space:nowrap;">
                             <a class="button" title="<?php echo esc_attr('Modifica metadati dello schema (non i campi).'); ?>" href="<?php echo esc_url(add_query_arg(['tab' => 'edit', 'schema_id' => (int) $s['id']], $baseUrl)); ?>">Edit</a>
                             <a class="button" title="<?php echo esc_attr('Apri il dettaglio campi (struttura).'); ?>" href="<?php echo esc_url(add_query_arg(['schema_id' => (int) $s['id'], 'tab' => 'schema'], $fieldsUrl)); ?>">Campi</a>
-                            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="display:inline;" onsubmit="return confirm('Eliminare lo schema?');">
+                            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="display:inline;" data-pbs-confirm="<?php echo esc_attr('Eliminare lo schema?'); ?>">
                                 <?php wp_nonce_field('pbs_schema_delete'); ?>
                                 <input type="hidden" name="action" value="pbs_schema_delete" />
                                 <input type="hidden" name="schema_id" value="<?php echo (int) $s['id']; ?>" />
@@ -236,3 +236,5 @@ $pbsHelpTip = static function (string $text): string {
         <?php endif; ?>
     <?php endif; ?>
 </div>
+
+<?php require PBS_PLUGIN_DIR . 'templates/pbs-confirm-dialog.php'; ?>

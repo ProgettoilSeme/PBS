@@ -8,8 +8,8 @@ Plugin Name: PBS (Power Bridge SQL)
 Plugin URI: https://www.progettoilseme.it
 
 Description: Generatore on-demand di servizi gLib-compliant a partire da schema dati (manuale o da CPT/ACF).
-Version: 0.0.2
-Released: 15 apr 2026
+Version: 0.0.3
+Released: 22 apr 2026
 Author: Giorgio Codazzi
 
 Licence: © 2026 Progetto il Seme

@@ -1,0 +1,44 @@
+
+                // Text-like components: render a single main editor (hide internal members like boxtext).
+                if (in_array($groupKind, ['text', 'title_text'], true)) {
+                    $mainKey = '';
+                    $mainType = 'text';
+                    foreach ($members as $m) {
+                        if (!is_array($m)) {
+                            continue;
+                        }
+                        $mk2 = (string) ($m['key'] ?? '');
+                        if ($mk2 === '') {
+                            continue;
+                        }
+                        $mt2 = (string) ($m['field_type'] ?? 'text');
+                        if ($mainKey === '') {
+                            $mainKey = $mk2;
+                            $mainType = $mt2;
+                        }
+                        if ($mt2 === 'html') {
+                            $mainKey = $mk2;
+                            $mainType = $mt2;
+                            break;
+                        }
+                    }
+                    if ($mainKey !== '') {
+                        $fields[] = [
+                            'id' => {{SVC_PAGE_SLUG_CODE}} . '_' . sanitize_key((string) $db . '_' . (string) $mainKey),
+                            'title' => $groupLabel,
+                            'callback' => [$this->adminCallbacks, 'inputField'],
+                            'page' => {{SVC_PAGE_SLUG_CODE}},
+                            'section' => {{SVC_PAGE_SLUG_CODE}} . '_main',
+                            'args' => [
+                                'group_db' => (string) $db,
+                                'group_kind' => (string) $groupKind,
+                                'member_key' => (string) $mainKey,
+                                'type' => (string) $mainType,
+                                'label' => (string) $groupLabel,
+                                'prefill' => is_array(($flags['prefill'] ?? null)) ? (string) (($flags['prefill'] ?? [])[$mainKey] ?? '') : '',
+                            ],
+                        ];
+                        continue;
+                    }
+                }
+
