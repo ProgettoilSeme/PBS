@@ -19,6 +19,37 @@ use PBS\Repository\SchemaRepository;
 final class ServiceDelta
 {
     /**
+     * Render a generator snippet from `templates/generator/snippets/`.
+     *
+     * Placeholder format: `{{VAR}}`.
+     *
+     * @param array<string,string> $vars
+     */
+    private function render_snippet(string $relPath, array $vars = []): string
+    {
+        $base = rtrim((string) (defined('PBS_PLUGIN_DIR') ? constant('PBS_PLUGIN_DIR') : ''), "/\\");
+        $path = $base !== '' ? ($base . '/templates/generator/snippets/' . ltrim($relPath, '/')) : '';
+        if ($path === '' || !is_file($path)) {
+            return '';
+        }
+
+        $tpl = (string) @file_get_contents($path);
+        if ($tpl === '') {
+            return '';
+        }
+
+        if (!$vars) {
+            return $tpl;
+        }
+
+        $repl = [];
+        foreach ($vars as $k => $v) {
+            $repl['{{' . $k . '}}'] = (string) $v;
+        }
+        return strtr($tpl, $repl);
+    }
+
+    /**
      * Analyze delta between PBS schema fields and a service mapping.
      *
      * @return array{ok:bool,errors:array<int,string>,warnings:array<int,string>,report:array<string,mixed>}
@@ -127,7 +158,8 @@ final class ServiceDelta
             $warnings[] = sprintf('Delta alto: %.0f%% (soglia 30%%). Verifica che il servizio sia quello corretto.', $deltaPct * 100);
         }
 
-        $alterSql = $this->build_alter_sql($svc['table_name'] ?? '', $fields, $added);
+        // DB delta: compare effective DLL (centralized preview) vs actual DB table.
+        $db = $this->build_db_delta((string) ($svc['table_name'] ?? ''), $schemaId, $fields);
 
         return [
             'ok' => true,
@@ -150,7 +182,15 @@ final class ServiceDelta
                 'table_key' => $tableKey,
                 'expected_table_key' => $expectedKey,
                 'table_name' => (string) ($svc['table_name'] ?? ''),
-                'alter_sql' => $alterSql,
+                // DB delta info (centralized DLL)
+                'dll_has_preview' => !empty($db['dll_has_preview']),
+                'db_table_exists' => !empty($db['table_exists']),
+                'db_expected_cols' => (array) ($db['expected_cols'] ?? []),
+                'db_existing_cols' => (array) ($db['existing_cols'] ?? []),
+                'db_missing_cols' => (array) ($db['missing_cols'] ?? []),
+                'db_extra_cols' => (array) ($db['extra_cols'] ?? []),
+                'alter_sql' => (array) ($db['alter_sql'] ?? []),
+                'create_sql' => (string) ($db['create_sql'] ?? ''),
             ],
         ];
     }
@@ -195,6 +235,7 @@ final class ServiceDelta
 
         $newPhp = (string) $repl['php'];
         $newPhp = $this->ensure_mirror_support_in_base($newPhp);
+        $newPhp = $this->ensure_table_columns_guard_in_base($newPhp);
         $ok = @file_put_contents($basePath, $newPhp);
         if ($ok === false) {
             return ['ok' => false, 'errors' => ["Impossibile scrivere: {$basePath}"], 'warnings' => (array) ($analysis['warnings'] ?? []), 'report' => $report];
@@ -403,6 +444,117 @@ final class ServiceDelta
     }
 
     /**
+     * DB delta builder based on centralized DLL preview.
+     *
+     * @param array<int,array<string,mixed>> $schemaFields
+     * @return array<string,mixed>
+     */
+    private function build_db_delta(string $tableName, int $schemaId, array $schemaFields): array
+    {
+        $out = [
+            'dll_has_preview' => false,
+            'table_exists' => false,
+            'expected_cols' => [],
+            'existing_cols' => [],
+            'missing_cols' => [],
+            'extra_cols' => [],
+            'alter_sql' => [],
+            'create_sql' => '',
+        ];
+
+        if ($tableName === '' || $schemaId <= 0) {
+            return $out;
+        }
+
+        $dll = new SchemaDll();
+        $effective = $dll->get_effective($schemaId, $schemaFields);
+        $out['dll_has_preview'] = !empty($effective['has_preview']);
+
+        $expectedDefs = [];
+        foreach ((array) ($effective['columns'] ?? []) as $c) {
+            if (!is_array($c)) {
+                continue;
+            }
+            $db = sanitize_key((string) ($c['db_column'] ?? ''));
+            if ($db === '') {
+                continue;
+            }
+            $expectedDefs[$db] = [
+                'sql_type' => (string) ($c['sql_type'] ?? 'LONGTEXT'),
+                'nullable' => !empty($c['nullable']),
+            ];
+        }
+        $out['expected_cols'] = array_keys($expectedDefs);
+
+        global $wpdb;
+        $found = $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $tableName));
+        $exists = ($found === $tableName);
+        $out['table_exists'] = $exists;
+
+        if (!$exists) {
+            // Provide create table SQL (best-effort, no PRIMARY KEY details for now beyond id).
+            $charset = $wpdb->get_charset_collate();
+            $lines = [];
+            $lines[] = "CREATE TABLE {$tableName} (";
+            $lines[] = "  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,";
+
+            foreach ($expectedDefs as $db => $def) {
+                if ($db === 'id') {
+                    continue;
+                }
+                $type = (string) ($def['sql_type'] ?? 'LONGTEXT');
+                $null = !empty($def['nullable']) ? 'NULL' : 'NOT NULL';
+                $lines[] = "  `{$db}` {$type} {$null},";
+            }
+            $lines[] = "  PRIMARY KEY (`id`)";
+            $lines[] = ") {$charset};";
+            $out['create_sql'] = implode("\n", $lines);
+            return $out;
+        }
+
+        // Existing columns
+        // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.PreparedSQL.NotPrepared
+        $cols = (array) $wpdb->get_results("SHOW COLUMNS FROM {$tableName}", ARRAY_A);
+        $existing = [];
+        foreach ($cols as $c) {
+            if (is_array($c) && isset($c['Field'])) {
+                $existing[sanitize_key((string) $c['Field'])] = true;
+            }
+        }
+        $out['existing_cols'] = array_keys($existing);
+
+        $missing = [];
+        foreach (array_keys($expectedDefs) as $db) {
+            if (!isset($existing[$db])) {
+                $missing[] = $db;
+            }
+        }
+        $out['missing_cols'] = $missing;
+
+        $extra = [];
+        foreach (array_keys($existing) as $db) {
+            if (!isset($expectedDefs[$db])) {
+                $extra[] = $db;
+            }
+        }
+        $out['extra_cols'] = $extra;
+
+        $sql = [];
+        foreach ($missing as $db) {
+            if ($db === 'id') {
+                continue;
+            }
+            $def = $expectedDefs[$db] ?? ['sql_type' => 'LONGTEXT', 'nullable' => true];
+            $type = (string) ($def['sql_type'] ?? 'LONGTEXT');
+            $null = !empty($def['nullable']) ? 'NULL' : 'NOT NULL';
+            $sql[] = "ALTER TABLE {$tableName} ADD COLUMN `{$db}` {$type} {$null};";
+        }
+        $out['alter_sql'] = $sql;
+
+        return $out;
+    }
+
+    /**
      * @return array{ok:bool,errors:array<int,string>,base_file?:string,table_name?:string}
      */
     private function resolve_service(string $pluginSlug, string $glibDir, string $serviceKey): array
@@ -493,26 +645,8 @@ final class ServiceDelta
         $newLines = [];
         foreach ($schemaCols as $db) {
             $f = $byDb[$db] ?? null;
-            if (isset($existing[$db]) && is_array($f)) {
-                $flags = json_decode((string) ($f['flags'] ?? ''), true) ?: [];
-                $schemaType = (string) ($f['field_type'] ?? 'text');
-                $schemaKind = '';
-                if (!empty($flags['group']) && is_array($flags['group'])) {
-                    $schemaKind = (string) ($flags['group']['kind'] ?? '');
-                }
-
-                $m = $existingMetaByDb[$db] ?? [];
-                $serviceType = (string) ($m['type'] ?? '');
-                $serviceKind = (string) ($m['group_kind'] ?? '');
-
-                $typeDiff = ($schemaType !== '' && $serviceType !== '' && $schemaType !== $serviceType);
-                $kindDiff = ($schemaKind !== '' && $schemaKind !== $serviceKind);
-                if (!$typeDiff && !$kindDiff) {
-                    $newLines[] = $existing[$db];
-                    continue;
-                }
-                // fallthrough: rigenero entry da schema (update mapping)
-            } elseif (isset($existing[$db]) && !is_array($f)) {
+            if (isset($existing[$db]) && !is_array($f)) {
+                // Keep untouched when schema has no row for this mapping entry.
                 $newLines[] = $existing[$db];
                 continue;
             }
@@ -520,11 +654,17 @@ final class ServiceDelta
             if (!is_array($f)) {
                 continue;
             }
+
+            // IMPORTANT: Always regenerate the entry from schema for PBS-managed fields.
+            // This keeps flags (especially flags.ui.list/edit/editable) in sync when user updates DLL preview.
             $name = (string) ($f['input_name'] ?? $db);
             $type = (string) ($f['field_type'] ?? 'text');
             $label = (string) ($f['label'] ?? $db);
             $flags = json_decode((string) ($f['flags'] ?? ''), true) ?: [];
             $flagsCode = var_export($flags, true);
+
+            // If type/group kind matches, we still update flags (ui/prefill/mirror/etc).
+            // If it differs, this regeneration also upgrades the mapping as expected.
             $newLines[] = "            '{$db}' => ['name' => '{$name}', 'type' => '{$type}', 'label' => " . var_export($label, true) . ", 'flags' => {$flagsCode}],";
         }
 
@@ -690,6 +830,204 @@ final class ServiceDelta
      */
     private function patch_admin_templates(string $pluginDir, string $glibFull, string $adminFile): void
     {
+        // 0) Ensure gLib has Dashboard + activation pattern (srv_managers + activated()).
+        $pluginSlug = basename(rtrim($pluginDir, "/\\"));
+        $glibNs = basename(rtrim($glibFull, "/\\"));
+        $serviceKey = '';
+        if ($adminFile !== '' && is_file($adminFile)) {
+            // ex: .../Api/Services/Shared/Archive/AdminArchives.php -> Archive
+            $serviceKey = sanitize_key(basename(dirname($adminFile)));
+        }
+        if ($serviceKey === '') {
+            $serviceKey = 'service';
+        }
+        $activationKey = 'admin_' . $serviceKey;
+
+        // BaseController: ensure srv_managers contains activation key and activated() exists.
+        $baseCtrl = rtrim($glibFull, '/') . '/Supports/Components/Admin/BaseController.php';
+        if (is_file($baseCtrl)) {
+            $php = (string) @file_get_contents($baseCtrl);
+            if ($php !== '' && str_contains($php, 'BaseController (light)')) {
+                if (!str_contains($php, 'const SETTINGS_ID')) {
+                    $php2 = preg_replace('/(public\\s+const\\s+PREFIX\\s*=\\s*[^;]+;\\s*\\n)/', "$1    public const SETTINGS_ID = self::PLUGIN_ID . '_settings';\n", $php, 1);
+                    if (is_string($php2) && $php2 !== '' && $php2 !== $php) {
+                        $php = $php2;
+                    }
+                }
+
+                if (preg_match('/public\\s+array\\s+\\$srv_managers\\s*=\\s*\\[(.*?)\\];/s', $php, $m) === 1) {
+                    $block = (string) ($m[1] ?? '');
+                    if (!str_contains($block, "'" . $activationKey . "'")) {
+                        $line = "\n            '" . $activationKey . "' => " . var_export('Activate ' . ucfirst($serviceKey), true) . ",";
+                        $newBlock = rtrim($block) . $line . "\n        ";
+                        $php = str_replace($m[0], "public array \$srv_managers = [{$newBlock}];", $php);
+                    }
+                }
+
+                if (!str_contains($php, 'function __construct')) {
+                    $php2 = preg_replace('/(public\\s+array\\s+\\$srv_managers\\s*=\\s*\\[[^\\]]*\\];\\s*\\n)/s', "$1\n    public function __construct()\n    {\n        \$this->srv_managers = array_filter(\$this->srv_managers, 'strlen');\n    }\n\n", $php, 1);
+                    if (is_string($php2) && $php2 !== '' && $php2 !== $php) {
+                        $php = $php2;
+                    }
+                }
+
+                if (!str_contains($php, 'function activated')) {
+                    $insertActivated = <<<'PHP'
+
+    /**
+     * Determina se un servizio è attivo (dashboard).
+     *
+     * Default: disattivo finché l'admin non abilita esplicitamente dalla Dashboard.
+     */
+    public function activated(string $key): bool
+    {
+        if (!array_key_exists($key, $this->srv_managers)) {
+            return false;
+        }
+        $opt = get_option(self::PLUGIN_ID);
+        if ($opt === false || !is_array($opt)) {
+            return false;
+        }
+        return array_key_exists($key, $opt) ? (bool) $opt[$key] : false;
+    }
+
+PHP;
+                    $php2 = preg_replace('/\\}\\s*\\z/', $insertActivated . "}\n", $php, 1);
+                    if (is_string($php2) && $php2 !== '' && $php2 !== $php) {
+                        $php = $php2;
+                    }
+                }
+
+                @file_put_contents($baseCtrl, $php);
+            }
+        }
+
+        // AdminDashboard: create if missing (best-effort).
+        $dashDir = rtrim($glibFull, '/') . '/Api/Services/Internal';
+        $dashFile = $dashDir . '/AdminDashboard.php';
+        if (!is_dir($dashDir)) {
+            @mkdir($dashDir, 0775, true);
+        }
+        if (!is_file($dashFile)) {
+            $pluginName = $pluginSlug !== '' ? $pluginSlug : 'PBS Plugin';
+            $dashPhp = $this->render_snippet('admin-dashboard.php.snip', [
+                'GLIB_NS' => $glibNs,
+                'PLUGIN_NAME' => $pluginName,
+                'MENU_SLUG' => $pluginSlug,
+                'PLUGIN_ICON' => 'dashicons-admin-generic',
+            ]);
+            if ($dashPhp !== '') {
+                @file_put_contents($dashFile, $dashPhp);
+            }
+        } else {
+            // Patch existing dashboard to use LSA-like toggle UI (no need to regenerate whole file).
+            $dashPhp = (string) @file_get_contents($dashFile);
+            if ($dashPhp !== '') {
+                // 1) Ensure checkboxField renders toggle UI (replace whole method body, robustly).
+                if (str_contains($dashPhp, 'function checkboxField') && str_contains($dashPhp, 'display:flex')) {
+                    $method = <<<'PHP'
+    /**
+     * @param array<string,mixed> $args
+     */
+    public function checkboxField(array $args): void
+    {
+        $id = sanitize_key((string) ($args['id'] ?? ''));
+        if ($id === '') {
+            return;
+        }
+        $opt = get_option(self::PLUGIN_ID);
+        $val = is_array($opt) && array_key_exists($id, $opt) ? (int) (bool) $opt[$id] : 0;
+        $cbId = 'pbs_srv_' . $id;
+
+        echo '<div class="ui-toggle">';
+        echo '<input type="checkbox" id="' . esc_attr($cbId) . '" name="' . esc_attr((string) self::PLUGIN_ID) . '[' . esc_attr($id) . ']" value="1" ' . checked(1, $val, false) . ' />';
+        echo '<label for="' . esc_attr($cbId) . '"><div></div></label>';
+        echo '</div>';
+    }
+
+PHP;
+                    $dashPhp2 = preg_replace(
+                        '/\\n\\s*\\/\\*\\*\\s*\\n\\s*\\*\\s*@param\\s+array<[^>]+>\\s*\\$args\\s*\\n\\s*\\*\\/\\s*\\n\\s*public\\s+function\\s+checkboxField\\(array\\s+\\$args\\)\\s*:\\s*void\\s*\{.*?(?=\n\s*public\s+function\s+render_dashboard)/s',
+                        "\n" . $method,
+                        $dashPhp,
+                        1
+                    );
+                    if (is_string($dashPhp2) && $dashPhp2 !== '' && $dashPhp2 !== $dashPhp) {
+                        $dashPhp = $dashPhp2;
+                    }
+                }
+
+                // 2) Inject toggle CSS once inside render_dashboard (after description).
+                if (str_contains($dashPhp, 'function render_dashboard') && !str_contains($dashPhp, 'div.ui-toggle input[type=checkbox]{display:none}')) {
+                    $css = "        echo '<style>\n"
+                        . "        div.ui-toggle{margin:0;padding:0}\n"
+                        . "        div.ui-toggle input[type=checkbox]{display:none}\n"
+                        . "        div.ui-toggle input[type=checkbox]:checked+label{border-color:#009eea;background:#009eea;box-shadow:inset 0 0 0 10px #009eea}\n"
+                        . "        div.ui-toggle input[type=checkbox]:checked+label>div{margin-left:20px}\n"
+                        . "        div.ui-toggle label{transition:all 200ms ease;display:inline-block;position:relative;user-select:none;background:#8c8c8c;box-shadow:inset 0 0 0 0 #009eea;border:2px solid #8c8c8c;border-radius:22px;width:40px;height:20px}\n"
+                        . "        div.ui-toggle label div{transition:all 200ms ease;background:#fff;width:20px;height:20px;border-radius:10px}\n"
+                        . "        div.ui-toggle label:hover,div.ui-toggle label>div:hover{cursor:pointer}\n"
+                        . "        </style>';\n";
+                    $dashPhp2 = preg_replace(
+                        "/(echo\\s+'<p\\s+class=\\\\\\\"description\\\\\\\"[^;]+;\\s*\\n)/",
+                        "$1\n" . $css . "\n",
+                        $dashPhp,
+                        1
+                    );
+                    if (is_string($dashPhp2) && $dashPhp2 !== '' && $dashPhp2 !== $dashPhp) {
+                        $dashPhp = $dashPhp2;
+                    }
+                }
+
+                @file_put_contents($dashFile, $dashPhp);
+            }
+        }
+
+        // Init.php: ensure AdminDashboard is included in services.
+        $initFile = rtrim($glibFull, '/') . '/Init.php';
+        if (is_file($initFile)) {
+            $php = (string) @file_get_contents($initFile);
+            if ($php !== '' && !str_contains($php, 'AdminDashboard::class')) {
+                if (!str_contains($php, 'use ' . $glibNs . '\\Api\\Services\\Internal\\AdminDashboard;')) {
+                    $php2 = preg_replace(
+                        '/(use\\s+' . preg_quote($glibNs, '/') . '\\\\Api\\\\Services\\\\CrossDomain\\\\LibraryBackEnd;\\s*\\n)/',
+                        "$1use {$glibNs}\\Api\\Services\\Internal\\AdminDashboard;\n",
+                        $php,
+                        1
+                    );
+                    if (is_string($php2) && $php2 !== '' && $php2 !== $php) {
+                        $php = $php2;
+                    }
+                }
+                $php2 = preg_replace(
+                    '/(LibraryBackEnd::class,\\s*\\n)/',
+                    "$1            AdminDashboard::class,\n",
+                    $php,
+                    1
+                );
+                if (is_string($php2) && $php2 !== '' && $php2 !== $php) {
+                    $php = $php2;
+                }
+                @file_put_contents($initFile, $php);
+            }
+        }
+
+        // SettingsApi: ensure default sanitize callback returns input (otherwise options won't save).
+        $settingsApi = rtrim($glibFull, '/') . '/Api/SettingsApi.php';
+        if (is_file($settingsApi)) {
+            $php = (string) @file_get_contents($settingsApi);
+            if ($php !== '' && str_contains($php, 'register_setting')) {
+                $php2 = preg_replace(
+                    '/static\\s+function\\s*\\(\\s*\\)\\s*:\\s*void\\s*\\{\\s*\\}/',
+                    'static function ($input) { return $input; }',
+                    $php
+                );
+                if (is_string($php2) && $php2 !== '' && $php2 !== $php) {
+                    @file_put_contents($settingsApi, $php2);
+                }
+            }
+        }
+
         // 1) Ensure gLib AdminCallbacks supports PBS prefill baked in mapping.
         $adminCallbacks = rtrim($glibFull, '/') . '/Api/Callbacks/AdminCallbacks.php';
         if (is_file($adminCallbacks)) {
@@ -705,6 +1043,7 @@ final class ServiceDelta
                 }
 
                 // a) inputField: apply args['prefill'] as default if record value is empty.
+                // Also: readonly/disabled support via args['readonly'] (centralized UI flags).
                 if (!str_contains($php, "args['prefill']") && str_contains($php, 'public function inputField')) {
                     $repGroup = <<<'REPL'
 $1            // PBS pre-fill (default/suggestion) baked in mapping at generation time.
@@ -742,6 +1081,35 @@ REPL;
                     }
                 }
 
+                // readonly support (best-effort): add $readonly and apply to inputs.
+                if (str_contains($php, 'public function inputField') && !str_contains($php, '$readonly')) {
+                    $php2 = preg_replace(
+                        '/(\\$groupKind\\s*=\\s*\\(string\\)\\s*\\(\\$args\\[\\x27group_kind\\x27\\]\\s*\\?\\?\\s*\\x27\\x27\\)\\s*;\\s*\\n)/',
+                        "$1        \$readonly = !empty(\$args['readonly']);\n",
+                        $php,
+                        1
+                    );
+                    if (is_string($php2) && $php2 !== '' && $php2 !== $php) {
+                        $php = $php2;
+                    }
+
+                    // checkboxes: add disabled
+                    $php2 = preg_replace('/(<input[^>]+type=\\\"checkbox\\\"[^>]*)(\\/>)/', '$1' . " . (\$readonly ? ' disabled' : '') . " . '$2', $php);
+                    if (is_string($php2) && $php2 !== '' && $php2 !== $php) {
+                        $php = $php2;
+                    }
+                    // text inputs: add readonly disabled
+                    $php2 = preg_replace('/(<input[^>]+class=\\\"regular-text\\\"[^>]*)(\\/>)/', '$1' . " . (\$readonly ? ' readonly disabled' : '') . " . '$2', $php);
+                    if (is_string($php2) && $php2 !== '' && $php2 !== $php) {
+                        $php = $php2;
+                    }
+                    // textareas: add readonly
+                    $php2 = preg_replace('/(<textarea[^>]+name=\\\"\\\"\\s*\\.\\s*esc_attr\\(\\$name\\)\\s*\\.\\s*\\\"\\\"[^>]*)(>)/', '$1' . " . (\$readonly ? ' readonly' : '') . " . '$2', $php);
+                    if (is_string($php2) && $php2 !== '' && $php2 !== $php) {
+                        $php = $php2;
+                    }
+                }
+
                 // b) componentPreviewField: merge defaults from args['prefill'] when present.
                 if (!str_contains($php, 'array_merge($prefill') && str_contains($php, 'public function componentPreviewField')) {
                     $repPreview = <<<'REPL'
@@ -765,42 +1133,15 @@ REPL;
                 }
 
                 // c) componentEditorField: ensure it forwards prefill to preview.
-                $insert = <<<'PHP'
-
-    /**
-     * Render a compact editor for complex components (single Settings API row).
-     *
-     * Prodotto finale: mostra solo l'anteprima. La configurazione dettagliata
-     * del componente è gestita in PBS (non nel plugin generato).
-     */
-    public function componentEditorField(array $args): void
-    {
-        $groupDb = (string) ($args['group_db'] ?? '');
-        $groupKind = (string) ($args['group_kind'] ?? '');
-        $groupLabel = (string) ($args['group_label'] ?? $groupDb);
-        if ($groupDb === '' || $groupKind === '') {
-            return;
-        }
-
-        if ($groupKind !== 'button') {
-            return;
-        }
-
-        $this->componentPreviewField([
-            'group_db' => $groupDb,
-            'group_kind' => $groupKind,
-            'group_label' => $groupLabel,
-            'prefill' => is_array($args['prefill'] ?? null) ? (array) $args['prefill'] : [],
-        ]);
-        echo '<p class="description" style="margin-top:8px;">Configurazione componente gestita in PBS (non nel plugin generato).</p>';
-    }
-
-PHP;
+                $insert = $this->render_snippet('admincallbacks-component-editor.php.snip');
 
                 // If exists, replace; otherwise insert before class end.
 	                if (str_contains($php, 'function componentEditorField')) {
+                        $patternComponentEditor = '/\n\s{4}public function componentEditorField\(array __PBS_ARGS__\): void\s*\{.*?\n\s{4}\}\n/s';
+                        // Avoid Intelephense false positives on "$args" inside regex strings.
+                        $patternComponentEditor = str_replace('__PBS_ARGS__', '\\$args', $patternComponentEditor);
 	                    $phpNew = preg_replace(
-	                        '/\n\s{4}public function componentEditorField\(array \$args\): void\s*\{.*?\n\s{4}\}\n/s',
+	                        $patternComponentEditor,
 	                        $insert . "\n",
 	                        $php
 	                    );
@@ -818,11 +1159,36 @@ PHP;
             }
         }
 
-        // 2) Patch service Admin*.php Settings API loop to pass prefill to callbacks.
+        // 2) Patch service Admin*.php Settings API loop to respect ui flags (edit/editable) + prefill.
         if ($adminFile !== '' && is_file($adminFile)) {
             $php = (string) @file_get_contents($adminFile);
             if ($php === '') {
                 return;
+            }
+
+            // Ensure activation gate exists at start of register().
+            if (!str_contains($php, 'activated(') && str_contains($php, 'private function register(): void')) {
+                $php2 = preg_replace(
+                    '/(private\\s+function\\s+register\\(\\)\\s*:\\s*void\\s*\\{\\s*\\n)/',
+                    "$1        // Dashboard activation (gLib standard). Default: disattivo finché abilitato.\n        if (!\$this->activated(" . var_export($activationKey, true) . ")) {\n            return;\n        }\n\n",
+                    $php,
+                    1
+                );
+                if (is_string($php2) && $php2 !== '' && $php2 !== $php) {
+                    $php = $php2;
+                    @file_put_contents($adminFile, $php);
+                }
+                $php = (string) @file_get_contents($adminFile);
+            }
+
+            // Ensure service doesn't create its own main menu (Dashboard owns it).
+            if (str_contains($php, '->addPages([') && str_contains($php, '->addSubPages([')) {
+                $php2 = preg_replace('/->addPages\\(\\[.*?\\]\\]\\)\\s*->whithSubPage\\(.*?\\)\\s*/s', '', $php, 1);
+                if (is_string($php2) && $php2 !== '' && $php2 !== $php) {
+                    $php = $php2;
+                    @file_put_contents($adminFile, $php);
+                }
+                $php = (string) @file_get_contents($adminFile);
             }
 
             // Infer service page slug literal for inserts.
@@ -835,7 +1201,7 @@ PHP;
             if (!str_contains($php, '$showBe') && str_contains($php, 'foreach ($this->match_db_inp_type as $db => $meta)')) {
                 $php = preg_replace(
                     '/foreach\s*\(\s*\\$this->match_db_inp_type\s+as\s+\\$db\s*=>\s*\\$meta\s*\)\s*\\{\s*/',
-                    "foreach (\$this->match_db_inp_type as \$db => \$meta) {\n            \$flags = (array) (\$meta['flags'] ?? []);\n            \$flow = (array) (\$flags['flow'] ?? []);\n            \$showBe = array_key_exists('be', \$flow) ? (bool) \$flow['be'] : true;\n            if (!empty(\$flags['hidden']) || !\$showBe || !empty(\$flags['mirror'])) {\n                continue;\n            }\n\n            ",
+                    "foreach (\$this->match_db_inp_type as \$db => \$meta) {\n            \$flags = (array) (\$meta['flags'] ?? []);\n            \$flow = (array) (\$flags['flow'] ?? []);\n            \$showBe = array_key_exists('be', \$flow) ? (bool) \$flow['be'] : true;\n            \$ui = (array) (\$flags['ui'] ?? []);\n            \$uiEdit = array_key_exists('edit', \$ui) ? (bool) \$ui['edit'] : true;\n            \$uiEditable = array_key_exists('editable', \$ui) ? (bool) \$ui['editable'] : true;\n            if (!empty(\$flags['hidden']) || !\$showBe || !empty(\$flags['mirror']) || !\$uiEdit) {\n                continue;\n            }\n\n            ",
                     $php,
                     1
                 );
@@ -847,53 +1213,13 @@ PHP;
             }
 
             // Text-like components: render a single main editor (hide internal members like boxtext).
-            if ($svcPageSlug !== '' && !str_contains($php, "in_array(\$groupKind, ['text', 'title_text']")) {
-                $textInsert = <<<PHP
-
-                // Text-like components: render a single main editor (hide internal members like boxtext).
-                if (in_array(\$groupKind, ['text', 'title_text'], true)) {
-                    \$mainKey = '';
-                    \$mainType = 'text';
-                    foreach (\$members as \$m) {
-                        if (!is_array(\$m)) {
-                            continue;
-                        }
-                        \$mk2 = (string) (\$m['key'] ?? '');
-                        if (\$mk2 === '') {
-                            continue;
-                        }
-                        \$mt2 = (string) (\$m['field_type'] ?? 'text');
-                        if (\$mainKey === '') {
-                            \$mainKey = \$mk2;
-                            \$mainType = \$mt2;
-                        }
-                        if (\$mt2 === 'html') {
-                            \$mainKey = \$mk2;
-                            \$mainType = \$mt2;
-                            break;
-                        }
-                    }
-                    if (\$mainKey !== '') {
-                        \$fields[] = [
-                            'id' => {$svcPageSlugCode} . '_' . sanitize_key((string) \$db . '_' . (string) \$mainKey),
-                            'title' => \$groupLabel,
-                            'callback' => [\$this->adminCallbacks, 'inputField'],
-                            'page' => {$svcPageSlugCode},
-                            'section' => {$svcPageSlugCode} . '_main',
-                            'args' => [
-                                'group_db' => (string) \$db,
-                                'group_kind' => (string) \$groupKind,
-                                'member_key' => (string) \$mainKey,
-                                'type' => (string) \$mainType,
-                                'label' => (string) \$groupLabel,
-                                'prefill' => is_array((\$flags['prefill'] ?? null)) ? (string) ((\$flags['prefill'] ?? [])[\$mainKey] ?? '') : '',
-                            ],
-                        ];
-                        continue;
-                    }
-                }
-
-PHP;
+            $needleTextKinds = "in_array(__PBS_GROUPKIND__, ['text', 'title_text']";
+            // Avoid Intelephense false positives on "$groupKind" inside strings.
+            $needleTextKinds = str_replace('__PBS_GROUPKIND__', '$groupKind', $needleTextKinds);
+            if ($svcPageSlug !== '' && !str_contains($php, $needleTextKinds)) {
+                $textInsert = $this->render_snippet('adminservice-text-like-main-editor.php.snip', [
+                    'SVC_PAGE_SLUG_CODE' => $svcPageSlugCode,
+                ]);
 
                 $php2 = preg_replace(
                     "/\\n\\s*\\/\\/ Compact editor for known complex kinds \\(MVP: button\\)\\s*\\n/",
@@ -907,13 +1233,16 @@ PHP;
                 }
             }
             // Ensure componentEditorField args include prefill for button groups.
-            if (!str_contains($php, "'prefill' =>") && str_contains($php, 'componentEditorField') && str_contains($php, '\'members\' => $members')) {
+            $needleMembers = '\'members\' => __PBS_MEMBERS__';
+            // Avoid Intelephense false positives on "$members" inside strings.
+            $needleMembers = str_replace('__PBS_MEMBERS__', '$members', $needleMembers);
+            if (!str_contains($php, "'prefill' =>") && str_contains($php, 'componentEditorField') && str_contains($php, $needleMembers)) {
                 $repPrefill = <<<'REPL'
 $1                            'prefill' => is_array(($flags['prefill'] ?? null)) ? (array) ($flags['prefill'] ?? []) : [],
 
 REPL;
                 $php2 = preg_replace(
-                    '/(\'members\'\\s*=>\\s*\\$members,\\s*\\n)/m',
+                    str_replace('__PBS_MEMBERS_RE__', '\\$members', '/(\'members\'\\s*=>\\s*__PBS_MEMBERS_RE__,\\s*\\n)/m'),
                     $repPrefill,
                     $php,
                     1
@@ -927,18 +1256,113 @@ REPL;
             $php = (string) @file_get_contents($adminFile);
             if ($php !== '' && str_contains($php, "'member_key'")) {
                 $repMemberPrefill = <<<'REPL'
-'label' => $ml,
-                            'prefill' => is_array(($flags['prefill'] ?? null)) ? (string) (($flags['prefill'] ?? [])[$mk] ?? '') : '',
+'label' => __PBS_ML__,
+                            'prefill' => is_array((__PBS_FLAGS__['prefill'] ?? null)) ? (string) ((__PBS_FLAGS__['prefill'] ?? [])[__PBS_MK__] ?? '') : '',
 
 REPL;
+                // Avoid Intelephense false positives on "$ml/$flags/$mk" inside nowdoc strings.
+                $repMemberPrefill = str_replace(
+                    ['__PBS_ML__', '__PBS_FLAGS__', '__PBS_MK__'],
+                    ['$ml', '$flags', '$mk'],
+                    $repMemberPrefill
+                );
+                $patternLabelPrefill = str_replace(
+                    '__PBS_ML_RE__',
+                    '\\$ml',
+                    '/\'label\'\\s*=>\\s*__PBS_ML_RE__,\\s*\\n(?!\\s*\'prefill\'\\s*=>)/m'
+                );
                 $php3 = preg_replace(
-                    '/\'label\'\\s*=>\\s*\\$ml,\\s*\\n(?!\\s*\'prefill\'\\s*=>)/m',
+                    $patternLabelPrefill,
                     $repMemberPrefill,
                     $php
                 );
                 if (is_string($php3) && $php3 !== '' && $php3 !== $php) {
                     @file_put_contents($adminFile, $php3);
                 }
+            }
+
+            // Ensure args include readonly => !$uiEditable (best-effort).
+            if (!str_contains($php, "'readonly'") && str_contains($php, "'args' => [")) {
+                $php2 = preg_replace(
+                    "/('label'\\s*=>\\s*\\(string\\)\\s*\\$groupLabel,\\s*\\n)/",
+                    "$1                                'readonly' => !\$uiEditable,\n",
+                    $php
+                );
+                if (is_string($php2) && $php2 !== '' && $php2 !== $php) {
+                    $php = $php2;
+                    @file_put_contents($adminFile, $php);
+                }
+            }
+        }
+
+        // 3) Patch UI/BE templates to render List columns dynamically (flags.ui.list).
+        $tplDir = rtrim($pluginDir, '/') . '/UI/BE/templates';
+        if (is_dir($tplDir)) {
+            foreach (glob($tplDir . '/*.php') ?: [] as $tpl) {
+                if (!is_file($tpl)) {
+                    continue;
+                }
+                $php = (string) @file_get_contents($tpl);
+                if ($php === '') {
+                    continue;
+                }
+
+                // Replace static header with dynamic header (robust to whitespace/newlines).
+                $headerPattern = '/<thead>\\s*<tr>\\s*<th[^>]*>\\s*ID\\s*<\\/th>\\s*<th[^>]*>\\s*Data\\s*<\\/th>\\s*<th[^>]*>\\s*Azioni\\s*<\\/th>\\s*<\\/tr>\\s*<\\/thead>/is';
+                if (preg_match($headerPattern, $php) !== 1) {
+                    // Not a PBS-like service list template.
+                    continue;
+                }
+
+                // 3a) Header: replace only if it doesn't already iterate list_cols.
+                if (!str_contains($php, 'foreach ($list_cols as $c)')) {
+                    $insert = <<<'PHP'
+            <thead>
+            <tr>
+                <th style="width:80px;">ID</th>
+                <th>Data</th>
+                <?php foreach ($list_cols as $c): ?>
+                    <th><?php echo esc_html((string) ($c['label'] ?? $c['db'] ?? '')); ?></th>
+                <?php endforeach; ?>
+                <th style="width:220px;">Azioni</th>
+            </tr>
+            </thead>
+PHP;
+                    $php2 = preg_replace($headerPattern, $insert, $php, 1);
+                    if (is_string($php2) && $php2 !== '' && $php2 !== $php) {
+                        $php = $php2;
+                    }
+                }
+
+                // 3b) Add list_cols computation after $base_url line if missing.
+                if (!str_contains($php, '$list_cols')) {
+                    $php = preg_replace(
+                        '/(\\$base_url\\s*=\\s*admin_url\\(\\x27admin\\.php\\?page=\\x27\\s*\\.\\s*[^;]+;\\s*\\n)/',
+                        "$1\n// UI columns for List tab (derived from mapping flags.ui.list).\n\$list_cols = [];\nif (isset(\$service) && is_object(\$service) && isset(\$service->match_db_inp_type) && is_array(\$service->match_db_inp_type)) {\n    foreach (\$service->match_db_inp_type as \$db => \$meta) {\n        if (!is_array(\$meta)) { continue; }\n        \$flags = (array) (\$meta['flags'] ?? []);\n        \$ui = (array) (\$flags['ui'] ?? []);\n        \$show = array_key_exists('list', \$ui) ? (bool) \$ui['list'] : false;\n        if (!\$show) { continue; }\n        \$list_cols[] = [\n            'db' => (string) \$db,\n            'label' => (string) ((\$meta['label'] ?? '') !== '' ? \$meta['label'] : \$db),\n        ];\n    }\n}\n\n\$pbs_cell = static function (\$val): string {\n    if (is_array(\$val)) {\n        if (isset(\$val['title']) && is_scalar(\$val['title'])) {\n            \$s = (string) \$val['title'];\n        } elseif (isset(\$val['p']) && is_scalar(\$val['p'])) {\n            \$s = wp_strip_all_tags((string) \$val['p']);\n        } elseif (isset(\$val['url']) && is_scalar(\$val['url'])) {\n            \$s = (string) \$val['url'];\n        } else {\n            \$s = wp_json_encode(\$val, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);\n        }\n        if (!is_string(\$s)) { \$s = ''; }\n        if (strlen(\$s) > 120) { \$s = substr(\$s, 0, 117) . '...'; }\n        return \$s;\n    }\n    \$s = is_scalar(\$val) ? (string) \$val : '';\n    if (strlen(\$s) > 120) { \$s = substr(\$s, 0, 117) . '...'; }\n    return \$s;\n};\n",
+                        $php,
+                        1
+                    ) ?: $php;
+                }
+
+                // 3c) Patch row rendering: insert columns cells after date (only if not already present).
+                if (!str_contains($php, 'foreach ($list_cols as $c):') || !str_contains($php, '$pbs_cell')) {
+                    $php = preg_replace(
+                        '/(<td>\\s*<\\?php\\s+echo\\s+esc_html\\(\\$date\\);\\s*\\?>\\s*<\\/td>\\s*)<td>/i',
+                        "$1\n                        <?php foreach (\$list_cols as \$c): ?>\n                            <?php \$db = (string) (\$c['db'] ?? ''); ?>\n                            <td><?php echo esc_html(\$pbs_cell(\$db !== '' && is_array(\$r) && array_key_exists(\$db, \$r) ? \$r[\$db] : '')); ?></td>\n                        <?php endforeach; ?>\n                        <td>",
+                        $php,
+                        1
+                    ) ?: $php;
+                }
+
+                // Patch colspan in empty records row (3 -> 3+count(list_cols)).
+                $php = preg_replace(
+                    '/<tr>\\s*<td\\s+colspan=\"3\"\\s*>\\s*<em>\\s*Nessun record\\.\\s*<\\/em>\\s*<\\/td>\\s*<\\/tr>/i',
+                    '<tr><td colspan="<?php echo esc_attr((string) (3 + count($list_cols))); ?>"><em>Nessun record.</em></td></tr>',
+                    $php,
+                    1
+                ) ?: $php;
+
+                @file_put_contents($tpl, $php);
             }
         }
     }
@@ -1048,6 +1472,110 @@ PHP;
 
         $php2 = preg_replace('/\\n\\s*protected function infer_formats\\(/', $method . "\n    protected function infer_formats(", $php, 1);
         return is_string($php2) && $php2 !== '' ? $php2 : $php;
+    }
+
+    /**
+     * Ensure Base*.php guards against missing DB columns after a schema evolution.
+     *
+     * PBS does not automatically ALTER tables; we return a clear error + suggested SQL instead.
+     */
+    private function ensure_table_columns_guard_in_base(string $php): string
+    {
+        if (str_contains($php, 'function ensure_table_has_columns')) {
+            // Ensure save_record calls it.
+            if (!str_contains($php, 'ensure_table_has_columns($data, $err)') && str_contains($php, '$data = $this->apply_mirrors')) {
+                $php2 = preg_replace(
+                    '/\\$data\\s*=\\s*\\$this->apply_mirrors\\([^;]*\\);/',
+                    "\$data = \$this->apply_mirrors(\$raw, \$data);\n        if (!\$this->ensure_table_has_columns(\$data, \$err)) {\n            return 0;\n        }",
+                    $php,
+                    1
+                );
+                if (is_string($php2) && $php2 !== '') {
+                    $php = $php2;
+                }
+            }
+            return $php;
+        }
+
+        // 1) Insert call in save_record after apply_mirrors.
+        if (str_contains($php, '$data = $this->apply_mirrors')) {
+            $php2 = preg_replace(
+                '/\\$data\\s*=\\s*\\$this->apply_mirrors\\([^;]*\\);/',
+                "\$data = \$this->apply_mirrors(\$raw, \$data);\n        if (!\$this->ensure_table_has_columns(\$data, \$err)) {\n            return 0;\n        }",
+                $php,
+                1
+            );
+            if (is_string($php2) && $php2 !== '') {
+                $php = $php2;
+            }
+        }
+
+        // 2) Insert method before get_create_table_sql (stable anchor).
+        $method = <<<'PHP'
+
+    /**
+     * Guard: avoid writing data into a table that is missing expected columns.
+     *
+     * PBS non modifica automaticamente il DB quando lo schema evolve.
+     * Se mancano colonne (es. dopo un Delta servizio), questa funzione ritorna false
+     * e fornisce SQL suggerito per l'ALTER TABLE.
+     *
+     * @param array<string,mixed> $data
+     */
+    protected function ensure_table_has_columns(array $data, string &$err = ''): bool
+    {
+        global $wpdb;
+        $err = '';
+
+        // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.PreparedSQL.NotPrepared
+        $cols = (array) $wpdb->get_results("SHOW COLUMNS FROM {$this->table}", ARRAY_A);
+        $existing = [];
+        foreach ($cols as $c) {
+            if (is_array($c) && isset($c['Field'])) {
+                $existing[(string) $c['Field']] = true;
+            }
+        }
+        if (!$existing) {
+            return true;
+        }
+
+        $missing = [];
+        foreach (array_keys($data) as $k) {
+            $k = (string) $k;
+            if ($k === '' || $k === 'id') {
+                continue;
+            }
+            if (!isset($existing[$k])) {
+                $missing[] = $k;
+            }
+        }
+        if (!$missing) {
+            return true;
+        }
+
+        $sql = [];
+        foreach ($missing as $m) {
+            $sql[] = "ALTER TABLE {$this->table} ADD COLUMN `" . esc_sql($m) . "` LONGTEXT NULL;";
+        }
+        $err = 'Colonne mancanti nella tabella: ' . implode(', ', $missing) . '. SQL suggerito: ' . implode(' ', $sql);
+        return false;
+    }
+
+PHP;
+
+        if (str_contains($php, 'public function get_create_table_sql')) {
+            $php2 = preg_replace(
+                '/\\n\\s*public function get_create_table_sql\\(\\): string\\s*\\{/m',
+                $method . "\n    public function get_create_table_sql(): string\n    {",
+                $php,
+                1
+            );
+            if (is_string($php2) && $php2 !== '') {
+                $php = $php2;
+            }
+        }
+
+        return $php;
     }
 
     /**

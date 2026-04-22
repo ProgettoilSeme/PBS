@@ -1,0 +1,29 @@
+
+    /**
+     * Render a compact editor for complex components (single Settings API row).
+     *
+     * Prodotto finale: mostra solo l'anteprima. La configurazione dettagliata
+     * del componente è gestita in PBS (non nel plugin generato).
+     */
+    public function componentEditorField(array $args): void
+    {
+        $groupDb = (string) ($args['group_db'] ?? '');
+        $groupKind = (string) ($args['group_kind'] ?? '');
+        $groupLabel = (string) ($args['group_label'] ?? $groupDb);
+        if ($groupDb === '' || $groupKind === '') {
+            return;
+        }
+
+        if ($groupKind !== 'button') {
+            return;
+        }
+
+        $this->componentPreviewField([
+            'group_db' => $groupDb,
+            'group_kind' => $groupKind,
+            'group_label' => $groupLabel,
+            'prefill' => is_array($args['prefill'] ?? null) ? (array) $args['prefill'] : [],
+        ]);
+        echo '<p class="description" style="margin-top:8px;">Configurazione componente gestita in PBS (non nel plugin generato).</p>';
+    }
+

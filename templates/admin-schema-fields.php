@@ -28,6 +28,7 @@ $tabs = [
     'list' => 'List',
     'preview' => 'Preview',
     'schema' => 'Schema',
+    'dll' => 'DLL',
     'new' => 'New',
     'edit' => 'Edit',
     'help' => 'Help',
@@ -209,6 +210,31 @@ $pbsHelpTip = static function (string $text): string {
         <?php if (!empty($_GET['pbs_ok']) && $_GET['pbs_ok'] === 'member_copied'): ?>
             <div class="notice notice-success"><p><strong>Membro copiato fuori dal gruppo.</strong></p></div>
         <?php endif; ?>
+        <?php if (!empty($_GET['pbs_err']) && $_GET['pbs_err'] === 'split_locked_kind'): ?>
+            <div class="notice notice-error"><p><strong>Split non consentito per componenti tipizzati (text/button). Usa Copy.</strong></p></div>
+        <?php endif; ?>
+
+        <?php $dllNotice = get_transient('pbs_schema_dll_notice_' . get_current_user_id()); ?>
+        <?php if (is_array($dllNotice) && isset($dllNotice['ok'], $dllNotice['message'])): ?>
+            <?php delete_transient('pbs_schema_dll_notice_' . get_current_user_id()); ?>
+            <?php $cls = !empty($dllNotice['ok']) ? 'notice-success' : 'notice-error'; ?>
+            <div class="notice <?php echo esc_attr($cls); ?>">
+                <p><strong><?php echo esc_html((string) $dllNotice['message']); ?></strong></p>
+                <?php if (!empty($dllNotice['diff']) && is_array($dllNotice['diff'])): ?>
+                    <?php $d = (array) $dllNotice['diff']; ?>
+                    <?php if (!empty($d['added']) || !empty($d['orphaned'])): ?>
+                        <ul style="margin-left:20px; list-style:disc;">
+                            <?php if (!empty($d['added'])): ?>
+                                <li>Aggiunte: <code><?php echo esc_html(implode(', ', (array) $d['added'])); ?></code></li>
+                            <?php endif; ?>
+                            <?php if (!empty($d['orphaned'])): ?>
+                                <li>Orfane (non più nello schema): <code><?php echo esc_html(implode(', ', (array) $d['orphaned'])); ?></code></li>
+                            <?php endif; ?>
+                        </ul>
+                    <?php endif; ?>
+                <?php endif; ?>
+            </div>
+        <?php endif; ?>
 
         <form method="get" action="<?php echo esc_url(admin_url('admin.php')); ?>" style="margin-top:16px;">
             <input type="hidden" name="page" value="pbs-schema-fields" />
@@ -367,6 +393,7 @@ $pbsHelpTip = static function (string $text): string {
                         $fflags = json_decode((string) ($f['flags'] ?? ''), true) ?: [];
                         $isGroup = !empty($fflags['group']) && is_array($fflags['group']);
                         $groupKind = $isGroup ? sanitize_key((string) ($fflags['group']['kind'] ?? 'generic')) : '';
+                        $groupSplitLocked = $isGroup && in_array($groupKind, ['text', 'button'], true);
                         $db = (string) ($f['db_column'] ?? '');
                         $label = (string) ($f['label'] ?? $db);
                         $prefillGroup = is_array($fflags['prefill'] ?? null) ? (array) $fflags['prefill'] : [];
@@ -400,7 +427,7 @@ $pbsHelpTip = static function (string $text): string {
                                         'pbs_field_delete'
                                     );
                                     ?>
-                                    <a class="button button-link-delete" href="<?php echo esc_url($deleteUrlPreview); ?>" onclick="return confirm('Eliminare questo campo dallo schema?');">Elimina</a>
+                                    <a class="button button-link-delete" href="<?php echo esc_url($deleteUrlPreview); ?>" data-pbs-confirm="<?php echo esc_attr('Eliminare questo campo dallo schema?'); ?>">Elimina</a>
                                 </div>
                             </div>
 
@@ -579,7 +606,11 @@ $pbsHelpTip = static function (string $text): string {
                                                 <td style="text-align:right; white-space:nowrap;">
                                                     <a class="button" href="<?php echo esc_url(add_query_arg(['schema_id' => $schemaId, 'tab' => 'edit', 'field_id' => (int) $f['id'], 'member_index' => (int) $idx], $baseUrl)); ?>">Edit</a>
                                                     <a class="button button-secondary" href="<?php echo esc_url($copyUrl); ?>">Copy</a>
-                                                    <a class="button button-secondary" href="<?php echo esc_url($splitUrl); ?>">Split</a>
+                                                    <?php if (!$groupSplitLocked): ?>
+                                                        <a class="button button-secondary" href="<?php echo esc_url($splitUrl); ?>">Split</a>
+                                                    <?php else: ?>
+                                                        <span class="description" title="<?php echo esc_attr('Split disabilitato per componenti tipizzati (text/button). Usa Copy per creare un mirror fuori dal gruppo.'); ?>" style="margin-left:8px;">Split (locked)</span>
+                                                    <?php endif; ?>
                                                 </td>
                                             </tr>
                                         <?php endforeach; ?>
@@ -885,7 +916,7 @@ $pbsHelpTip = static function (string $text): string {
                         </form>
 
                     <?php if ($isEdit): ?>
-                        <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" onsubmit="return confirm('Eliminare il campo?');">
+                        <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" data-pbs-confirm="<?php echo esc_attr('Eliminare il campo?'); ?>">
                             <?php wp_nonce_field('pbs_field_delete'); ?>
                             <input type="hidden" name="action" value="pbs_field_delete" />
                             <input type="hidden" name="schema_id" value="<?php echo $schemaId; ?>" />
@@ -1011,6 +1042,7 @@ $pbsHelpTip = static function (string $text): string {
                                 $fflags = json_decode((string) ($f['flags'] ?? ''), true) ?: [];
                                 $isGroup = !empty($fflags['group']) && is_array($fflags['group']);
                                 $groupKind = $isGroup ? (string) ($fflags['group']['kind'] ?? '') : '';
+                                $groupSplitLocked = $isGroup && in_array(sanitize_key($groupKind), ['text', 'button'], true);
                                 $isMirror = !empty($fflags['mirror']) && is_array($fflags['mirror']);
                                 $mirrorPath = '';
                                 if ($isMirror) {
@@ -1043,7 +1075,7 @@ $pbsHelpTip = static function (string $text): string {
                                     </td>
                                     <td style="text-align:right; white-space:nowrap;">
                                         <a class="button" title="<?php echo esc_attr('Modifica campo/gruppo.'); ?>" href="<?php echo esc_url(add_query_arg(['schema_id' => $schemaId, 'tab' => 'edit', 'field_id' => (int) $f['id']], $baseUrl)); ?>">Edit</a>
-                                        <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="display:inline;" onsubmit="return confirm('<?php echo esc_js($isGroup ? 'Eliminare questo gruppo e tutti i suoi membri?' : 'Eliminare questo campo?'); ?>');">
+                                        <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="display:inline;" data-pbs-confirm="<?php echo esc_attr($isGroup ? 'Eliminare questo gruppo e tutti i suoi membri?' : 'Eliminare questo campo?'); ?>">
                                             <?php wp_nonce_field('pbs_field_delete'); ?>
                                             <input type="hidden" name="action" value="pbs_field_delete" />
                                             <input type="hidden" name="schema_id" value="<?php echo (int) $schemaId; ?>" />
@@ -1082,7 +1114,11 @@ $pbsHelpTip = static function (string $text): string {
                                                         <input type="hidden" name="field_id" value="<?php echo (int) $f['id']; ?>" />
                                                         <input type="hidden" name="member_index" value="<?php echo (int) $idx; ?>" />
                                                     <input type="hidden" name="return_tab" value="schema" />
-                                                        <?php submit_button('Split', 'secondary', 'submit', false, ['title' => 'Estrae il membro dal gruppo (rompe l’integrità del componente tipizzato). Usa quando non vuoi più mantenere la rappresentazione del componente.']); ?>
+                                                        <?php if ($groupSplitLocked): ?>
+                                                            <?php submit_button('Split (locked)', 'secondary', 'submit', false, ['disabled' => true, 'title' => 'Split disabilitato per componenti tipizzati (text/button). Usa Copy per creare un mirror fuori dal gruppo.']); ?>
+                                                        <?php else: ?>
+                                                            <?php submit_button('Split', 'secondary', 'submit', false, ['title' => 'Estrae il membro dal gruppo (rompe l’integrità del componente tipizzato). Usa quando non vuoi più mantenere la rappresentazione del componente.']); ?>
+                                                        <?php endif; ?>
                                                     </form>
                                             </td>
                                         </tr>
@@ -1142,7 +1178,7 @@ $pbsHelpTip = static function (string $text): string {
                     <hr/>
                     <h2>Delete fields</h2>
                     <p class="description">Rimuove tutti i campi dello schema (mantiene lo schema e i suoi metadati in Schemi).</p>
-                    <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" onsubmit="return confirm('Svuotare tutti i campi di questo schema?');">
+                    <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" data-pbs-confirm="<?php echo esc_attr('Svuotare tutti i campi di questo schema?'); ?>">
                         <?php wp_nonce_field('pbs_schema_fields_clear'); ?>
                         <input type="hidden" name="action" value="pbs_schema_fields_clear" />
                         <input type="hidden" name="schema_id" value="<?php echo $schemaId; ?>" />
@@ -1150,6 +1186,160 @@ $pbsHelpTip = static function (string $text): string {
                     </form>
                 </div>
             <?php endif; ?>
+
+            <?php if ($tab === 'dll' && $schema): ?>
+                <?php
+                $dllSvc = new \PBS\Services\SchemaDll();
+                $preview = $dllSvc->get_preview($schemaId);
+                $effective = $dllSvc->get_effective($schemaId, $fields);
+                $cols = (array) ($effective['columns'] ?? []);
+                $hasPreview = !empty($effective['has_preview']);
+                ?>
+
+                <div style="margin-top:16px; max-width:1200px;">
+                    <h2 style="margin-top:0;">PREVIEW DB SCHEMA (DLL)</h2>
+                    <p class="description">
+                        Questa tab centralizza la DLL attesa per il servizio generato. È una preview editabile (non SQL) usata da generazione e delta.
+                        <?php if (!$hasPreview): ?>
+                            <strong>Modalità fallback:</strong> preview non inizializzata (solo lettura). Premi <strong>Init/Merge</strong> per crearla.
+                        <?php endif; ?>
+                    </p>
+
+                    <div style="margin:10px 0; display:flex; gap:10px; align-items:center;">
+                        <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="display:inline;">
+                            <?php wp_nonce_field('pbs_schema_dll_merge'); ?>
+                            <input type="hidden" name="action" value="pbs_schema_dll_merge" />
+                            <input type="hidden" name="schema_id" value="<?php echo (int) $schemaId; ?>" />
+                            <?php submit_button($hasPreview ? 'Merge DLL (on-demand)' : 'Init DLL (on-demand)', 'primary', 'submit', false); ?>
+                        </form>
+
+                        <?php if ($hasPreview): ?>
+                            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="display:inline;" data-pbs-confirm="<?php echo esc_attr('Rimuovere la DLL preview? (torna in fallback)'); ?>">
+                                <?php wp_nonce_field('pbs_schema_dll_delete'); ?>
+                                <input type="hidden" name="action" value="pbs_schema_dll_delete" />
+                                <input type="hidden" name="schema_id" value="<?php echo (int) $schemaId; ?>" />
+                                <?php submit_button('Delete preview', 'delete', 'submit', false); ?>
+                            </form>
+                        <?php endif; ?>
+                    </div>
+
+                    <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="margin-top:12px;">
+                        <?php wp_nonce_field('pbs_schema_dll_save'); ?>
+                        <input type="hidden" name="action" value="pbs_schema_dll_save" />
+                        <input type="hidden" name="schema_id" value="<?php echo (int) $schemaId; ?>" />
+
+                        <table class="widefat striped">
+                            <thead>
+                            <tr>
+                                <th>DB column<?php echo $pbsHelpTip('Nome colonna finale nella tabella (DLL).'); ?></th>
+                                <th>SQL type<?php echo $pbsHelpTip('Tipo SQL (es. LONGTEXT, VARCHAR(255), TINYINT(1)).'); ?></th>
+                                <th style="text-align:center;">NULL<?php echo $pbsHelpTip('Se abilitato, colonna NULL.'); ?></th>
+                                <th style="text-align:center;">On<?php echo $pbsHelpTip('Se disabilitato, la colonna NON viene considerata dalla DLL effettiva (generazione/delta).'); ?></th>
+                                <th>Source<?php echo $pbsHelpTip('Origine: system / schema / manual / orphan.'); ?></th>
+                                <th style="text-align:right;">Azioni</th>
+                                <th style="text-align:center;">List<?php echo $pbsHelpTip('Mostra in tabellina BE del generato.'); ?></th>
+                                <th style="text-align:center;">Edit<?php echo $pbsHelpTip('Mostra nel form Edit/New BE del generato.'); ?></th>
+                                <th style="text-align:center;">Editable<?php echo $pbsHelpTip('Campo modificabile nel form BE del generato.'); ?></th>
+                            </tr>
+                            </thead>
+                            <tbody>
+                            <?php foreach ($cols as $c): ?>
+                                <?php if (!is_array($c)) continue; ?>
+                                <?php
+                                $db = (string) ($c['db_column'] ?? '');
+                                $k = sanitize_key($db);
+                                $ui = is_array($c['ui'] ?? null) ? (array) $c['ui'] : ['list' => false, 'edit' => true, 'editable' => true];
+                                $src = (string) ($c['source'] ?? '');
+                                $isSys = in_array($db, ['id', 'created_at', 'updated_at'], true);
+                                $isRemovable = $hasPreview && in_array($src, ['manual', 'orphan'], true) && !$isSys;
+                                $enabled = array_key_exists('enabled', $c) ? (bool) $c['enabled'] : true;
+                                ?>
+                                <tr <?php echo !$enabled ? 'style="opacity:0.55;"' : ($src === 'orphan' ? 'style="background:#fff7ed;"' : ''); ?>>
+                                    <td><code><?php echo esc_html($db); ?></code></td>
+                                    <td>
+                                        <?php if ($hasPreview && !$isSys): ?>
+                                            <input type="text" class="regular-text" name="sql_type[<?php echo esc_attr($k); ?>]" value="<?php echo esc_attr((string) ($c['sql_type'] ?? 'LONGTEXT')); ?>" />
+                                        <?php else: ?>
+                                            <code><?php echo esc_html((string) ($c['sql_type'] ?? '')); ?></code>
+                                        <?php endif; ?>
+                                    </td>
+                                    <td style="text-align:center;">
+                                        <?php if ($hasPreview && !$isSys): ?>
+                                            <input type="checkbox" name="nullable[<?php echo esc_attr($k); ?>]" value="1" <?php checked(!empty($c['nullable'])); ?> />
+                                        <?php else: ?>
+                                            <?php echo !empty($c['nullable']) ? 'YES' : 'NO'; ?>
+                                        <?php endif; ?>
+                                    </td>
+                                    <td style="text-align:center;">
+                                        <?php if ($hasPreview && !$isSys): ?>
+                                            <input type="checkbox" name="enabled[<?php echo esc_attr($k); ?>]" value="1" <?php checked($enabled); ?> />
+                                        <?php else: ?>
+                                            <?php echo $enabled ? '✓' : '—'; ?>
+                                        <?php endif; ?>
+                                    </td>
+                                    <td><?php echo esc_html($src !== '' ? $src : 'schema'); ?></td>
+                                    <td style="text-align:right; white-space:nowrap;">
+                                        <?php if ($isRemovable): ?>
+                                            <?php
+                                            $delUrl = wp_nonce_url(add_query_arg([
+                                                'action' => 'pbs_schema_dll_col_delete',
+                                                'schema_id' => (int) $schemaId,
+                                                'db_column' => (string) $db,
+                                            ], admin_url('admin-post.php')), 'pbs_schema_dll_col_delete');
+                                            ?>
+                                            <a class="button button-link-delete" href="<?php echo esc_url($delUrl); ?>" data-pbs-confirm="<?php echo esc_attr('Rimuovere la colonna dalla DLL preview?'); ?>">Elimina</a>
+                                        <?php else: ?>
+                                            <span class="description">—</span>
+                                        <?php endif; ?>
+                                    </td>
+                                    <td style="text-align:center;">
+                                        <?php if ($hasPreview): ?>
+                                            <input type="checkbox" name="ui_list[<?php echo esc_attr($k); ?>]" value="1" <?php checked(!empty($ui['list'])); ?> />
+                                        <?php else: ?>
+                                            <?php echo !empty($ui['list']) ? '✓' : '—'; ?>
+                                        <?php endif; ?>
+                                    </td>
+                                    <td style="text-align:center;">
+                                        <?php if ($hasPreview): ?>
+                                            <input type="checkbox" name="ui_edit[<?php echo esc_attr($k); ?>]" value="1" <?php checked(!empty($ui['edit'])); ?> />
+                                        <?php else: ?>
+                                            <?php echo !empty($ui['edit']) ? '✓' : '—'; ?>
+                                        <?php endif; ?>
+                                    </td>
+                                    <td style="text-align:center;">
+                                        <?php if ($hasPreview): ?>
+                                            <input type="checkbox" name="ui_editable[<?php echo esc_attr($k); ?>]" value="1" <?php checked(!empty($ui['editable'])); ?> />
+                                        <?php else: ?>
+                                            <?php echo !empty($ui['editable']) ? '✓' : '—'; ?>
+                                        <?php endif; ?>
+                                    </td>
+                                </tr>
+                            <?php endforeach; ?>
+
+                            <?php if ($hasPreview): ?>
+                                <tr style="background:#f6f7f7;">
+                                    <td><input name="new_db_column" type="text" class="regular-text" placeholder="es. my_extra" /></td>
+                                    <td><input name="new_sql_type" type="text" class="regular-text" value="LONGTEXT" /></td>
+                                    <td style="text-align:center;"><input type="checkbox" name="new_nullable" value="1" /></td>
+                                    <td style="text-align:center;">✓</td>
+                                    <td><span class="description">manual</span></td>
+                                    <td style="text-align:right;"><span class="description">—</span></td>
+                                    <td style="text-align:center;"><input type="checkbox" disabled /></td>
+                                    <td style="text-align:center;"><input type="checkbox" disabled checked /></td>
+                                    <td style="text-align:center;"><input type="checkbox" disabled checked /></td>
+                                </tr>
+                            <?php endif; ?>
+                            </tbody>
+                        </table>
+
+                        <?php if ($hasPreview): ?>
+                            <?php submit_button('Salva DLL preview'); ?>
+                        <?php endif; ?>
+                    </form>
+                </div>
+            <?php endif; ?>
         <?php endif; ?>
     <?php endif; ?>
 </div>
+
+<?php require PBS_PLUGIN_DIR . 'templates/pbs-confirm-dialog.php'; ?>

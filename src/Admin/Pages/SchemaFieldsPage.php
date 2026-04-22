@@ -8,6 +8,7 @@ use PBS\Repository\SchemaRepository;
 use PBS\Repository\FieldRepository;
 use PBS\Repository\GenerationRepository;
 use PBS\Services\ACFImporter;
+use PBS\Services\SchemaDll;
 
 /**
  * Admin page: PBS → Dettaglio schema (campi).
@@ -50,6 +51,10 @@ final class SchemaFieldsPage
         add_action('admin_post_pbs_group_create', [$this, 'handle_group_create']);
         add_action('admin_post_pbs_group_member_update', [$this, 'handle_group_member_update']);
         add_action('admin_post_pbs_schema_prefill_save', [$this, 'handle_schema_prefill_save']);
+        add_action('admin_post_pbs_schema_dll_merge', [$this, 'handle_schema_dll_merge']);
+        add_action('admin_post_pbs_schema_dll_save', [$this, 'handle_schema_dll_save']);
+        add_action('admin_post_pbs_schema_dll_delete', [$this, 'handle_schema_dll_delete']);
+        add_action('admin_post_pbs_schema_dll_col_delete', [$this, 'handle_schema_dll_col_delete']);
     }
 
     /**
@@ -93,6 +98,289 @@ final class SchemaFieldsPage
         $acfAvailable = $importer->is_available();
 
         require PBS_PLUGIN_DIR . 'templates/admin-schema-fields.php';
+    }
+
+    /**
+     * Init/Merge DLL preview for a schema (on-demand).
+     *
+     * This does NOT change DB. It stores a centralized preview used by generator/delta.
+     */
+    public function handle_schema_dll_merge(): void
+    {
+        if (!current_user_can('manage_options')) {
+            wp_die('Not allowed.');
+        }
+        check_admin_referer('pbs_schema_dll_merge');
+
+        $schemaId = (int) ($_POST['schema_id'] ?? 0);
+        if ($schemaId <= 0) {
+            wp_safe_redirect(add_query_arg(['page' => 'pbs-schema-fields'], admin_url('admin.php')));
+            exit;
+        }
+
+        $fieldRepo = new FieldRepository();
+        $schemaRepo = new SchemaRepository();
+        $fields = $fieldRepo->list_by_schema($schemaId);
+
+        $dll = new SchemaDll();
+        $derived = $dll->build_default($fields);
+        $existing = $dll->get_preview($schemaId);
+
+        $diff = ['added' => [], 'orphaned' => []];
+        if (is_array($existing)) {
+            $merged = $dll->merge_preview($existing, $derived);
+            $dll->save_preview($schemaId, (array) ($merged['preview'] ?? $derived));
+            $diff = (array) ($merged['diff'] ?? $diff);
+        } else {
+            $dll->save_preview($schemaId, $derived);
+            $diff['added'] = array_map(static fn($c) => is_array($c) ? (string) ($c['db_column'] ?? '') : '', (array) ($derived['columns'] ?? []));
+        }
+
+        set_transient('pbs_schema_dll_notice_' . get_current_user_id(), [
+            'ok' => true,
+            'message' => 'DLL preview aggiornata.',
+            'diff' => $diff,
+        ], 60);
+
+        $schemaRepo->bump_version($schemaId);
+
+        wp_safe_redirect(add_query_arg([
+            'page' => 'pbs-schema-fields',
+            'schema_id' => $schemaId,
+            'tab' => 'dll',
+            'pbs_ok' => 'dll_merged',
+        ], admin_url('admin.php')));
+        exit;
+    }
+
+    /**
+     * Save edited DLL preview (columns + ui flags) for a schema.
+     */
+    public function handle_schema_dll_save(): void
+    {
+        if (!current_user_can('manage_options')) {
+            wp_die('Not allowed.');
+        }
+        check_admin_referer('pbs_schema_dll_save');
+
+        $schemaId = (int) ($_POST['schema_id'] ?? 0);
+        if ($schemaId <= 0) {
+            wp_safe_redirect(add_query_arg(['page' => 'pbs-schema-fields'], admin_url('admin.php')));
+            exit;
+        }
+
+        $dll = new SchemaDll();
+        $preview = $dll->get_preview($schemaId);
+        if (!is_array($preview)) {
+            // If not initialized, do nothing (fallback mode).
+            set_transient('pbs_schema_dll_notice_' . get_current_user_id(), [
+                'ok' => false,
+                'message' => 'DLL preview non inizializzata. Usa "Init/Merge".',
+            ], 60);
+            wp_safe_redirect(add_query_arg(['page' => 'pbs-schema-fields', 'schema_id' => $schemaId, 'tab' => 'dll', 'pbs_err' => 'dll_missing'], admin_url('admin.php')));
+            exit;
+        }
+
+        $existingCols = is_array($preview['columns'] ?? null) ? (array) $preview['columns'] : [];
+        $byDb = [];
+        foreach ($existingCols as $c) {
+            if (is_array($c) && !empty($c['db_column'])) {
+                $byDb[(string) $c['db_column']] = $c;
+            }
+        }
+
+        $uiList = is_array($_POST['ui_list'] ?? null) ? (array) $_POST['ui_list'] : [];
+        $uiEdit = is_array($_POST['ui_edit'] ?? null) ? (array) $_POST['ui_edit'] : [];
+        $uiEditable = is_array($_POST['ui_editable'] ?? null) ? (array) $_POST['ui_editable'] : [];
+        $enabledMap = is_array($_POST['enabled'] ?? null) ? (array) $_POST['enabled'] : [];
+
+        $sqlTypes = is_array($_POST['sql_type'] ?? null) ? (array) $_POST['sql_type'] : [];
+        $nullable = is_array($_POST['nullable'] ?? null) ? (array) $_POST['nullable'] : [];
+
+        // Update existing columns
+        foreach ($byDb as $db => $c) {
+            $k = sanitize_key($db);
+            $isSys = in_array($db, ['id', 'created_at', 'updated_at'], true);
+            $c['enabled'] = $isSys ? true : array_key_exists($k, $enabledMap);
+            $ui = is_array($c['ui'] ?? null) ? (array) $c['ui'] : ['list' => false, 'edit' => true, 'editable' => true];
+            $ui['list'] = array_key_exists($k, $uiList);
+            $ui['edit'] = array_key_exists($k, $uiEdit);
+            $ui['editable'] = array_key_exists($k, $uiEditable);
+            $c['ui'] = $ui;
+
+            if (array_key_exists($k, $sqlTypes)) {
+                $st = sanitize_text_field((string) $sqlTypes[$k]);
+                if ($st !== '') {
+                    $c['sql_type'] = $st;
+                }
+            }
+            $c['nullable'] = array_key_exists($k, $nullable);
+
+            $byDb[$db] = $c;
+        }
+
+        // Add manual column (optional)
+        $newName = sanitize_key((string) ($_POST['new_db_column'] ?? ''));
+        $newType = sanitize_text_field((string) ($_POST['new_sql_type'] ?? 'LONGTEXT'));
+        $newNullable = !empty($_POST['new_nullable']);
+        if ($newName !== '' && !isset($byDb[$newName]) && !in_array($newName, ['id', 'created_at', 'updated_at'], true)) {
+            $byDb[$newName] = [
+                'db_column' => $newName,
+                'sql_type' => $newType !== '' ? $newType : 'LONGTEXT',
+                'nullable' => $newNullable,
+                'source' => 'manual',
+                'enabled' => true,
+                'ui' => [
+                    'list' => false,
+                    'edit' => true,
+                    'editable' => true,
+                ],
+            ];
+        }
+
+        $preview['columns'] = array_values($byDb);
+        $preview['meta'] = array_merge(is_array($preview['meta'] ?? null) ? (array) $preview['meta'] : [], [
+            'updated_at' => current_time('mysql'),
+        ]);
+        $dll->save_preview($schemaId, $preview);
+
+        // Also propagate UI flags into schema fields (single source for generator templates).
+        $fieldRepo = new FieldRepository();
+        $fields = $fieldRepo->list_by_schema($schemaId);
+        foreach ($fields as $f) {
+            if (!is_array($f) || empty($f['db_column'])) {
+                continue;
+            }
+            $db = sanitize_key((string) $f['db_column']);
+            if ($db === '' || !isset($byDb[$db])) {
+                continue;
+            }
+            $flags = json_decode((string) ($f['flags'] ?? ''), true) ?: [];
+            $flags['ui'] = (array) (($byDb[$db]['ui'] ?? null) ?: []);
+            $fieldRepo->update($schemaId, (int) $f['id'], [
+                'db_column' => (string) ($f['db_column'] ?? ''),
+                'input_name' => (string) ($f['input_name'] ?? ''),
+                'label' => (string) ($f['label'] ?? ''),
+                'field_type' => (string) ($f['field_type'] ?? 'text'),
+                'flags' => $flags,
+            ]);
+        }
+
+        (new SchemaRepository())->bump_version($schemaId);
+
+        set_transient('pbs_schema_dll_notice_' . get_current_user_id(), [
+            'ok' => true,
+            'message' => 'DLL preview salvata.',
+        ], 60);
+
+        wp_safe_redirect(add_query_arg([
+            'page' => 'pbs-schema-fields',
+            'schema_id' => $schemaId,
+            'tab' => 'dll',
+            'pbs_ok' => 'dll_saved',
+        ], admin_url('admin.php')));
+        exit;
+    }
+
+    /**
+     * Delete DLL preview for a schema (manual removal).
+     */
+    public function handle_schema_dll_delete(): void
+    {
+        if (!current_user_can('manage_options')) {
+            wp_die('Not allowed.');
+        }
+        check_admin_referer('pbs_schema_dll_delete');
+
+        $schemaId = (int) ($_POST['schema_id'] ?? 0);
+        if ($schemaId <= 0) {
+            wp_safe_redirect(add_query_arg(['page' => 'pbs-schema-fields'], admin_url('admin.php')));
+            exit;
+        }
+
+        (new SchemaDll())->delete_preview($schemaId);
+        (new SchemaRepository())->bump_version($schemaId);
+
+        set_transient('pbs_schema_dll_notice_' . get_current_user_id(), [
+            'ok' => true,
+            'message' => 'DLL preview rimossa.',
+        ], 60);
+
+        wp_safe_redirect(add_query_arg([
+            'page' => 'pbs-schema-fields',
+            'schema_id' => $schemaId,
+            'tab' => 'dll',
+            'pbs_ok' => 'dll_deleted',
+        ], admin_url('admin.php')));
+        exit;
+    }
+
+    /**
+     * Delete a single column from DLL preview (manual/orphan only).
+     */
+    public function handle_schema_dll_col_delete(): void
+    {
+        if (!current_user_can('manage_options')) {
+            wp_die('Not allowed.');
+        }
+        check_admin_referer('pbs_schema_dll_col_delete');
+
+        $schemaId = (int) ($_GET['schema_id'] ?? 0);
+        $dbColumn = sanitize_key((string) ($_GET['db_column'] ?? ''));
+        if ($schemaId <= 0 || $dbColumn === '') {
+            wp_safe_redirect(add_query_arg(['page' => 'pbs-schema-fields'], admin_url('admin.php')));
+            exit;
+        }
+
+        $dll = new SchemaDll();
+        $preview = $dll->get_preview($schemaId);
+        if (!is_array($preview) || !is_array($preview['columns'] ?? null)) {
+            wp_safe_redirect(add_query_arg(['page' => 'pbs-schema-fields', 'schema_id' => $schemaId, 'tab' => 'dll', 'pbs_err' => 'dll_missing'], admin_url('admin.php')));
+            exit;
+        }
+
+        $cols = (array) $preview['columns'];
+        $out = [];
+        $removed = false;
+        foreach ($cols as $c) {
+            if (!is_array($c)) {
+                continue;
+            }
+            $db = sanitize_key((string) ($c['db_column'] ?? ''));
+            if ($db === $dbColumn) {
+                $src = (string) ($c['source'] ?? '');
+                if (in_array($src, ['manual', 'orphan'], true) && !in_array($db, ['id', 'created_at', 'updated_at'], true)) {
+                    $removed = true;
+                    continue;
+                }
+            }
+            $out[] = $c;
+        }
+
+        if ($removed) {
+            $preview['columns'] = array_values($out);
+            $preview['meta'] = array_merge(is_array($preview['meta'] ?? null) ? (array) $preview['meta'] : [], [
+                'updated_at' => current_time('mysql'),
+            ]);
+            $dll->save_preview($schemaId, $preview);
+            (new SchemaRepository())->bump_version($schemaId);
+            set_transient('pbs_schema_dll_notice_' . get_current_user_id(), [
+                'ok' => true,
+                'message' => 'Colonna rimossa dalla DLL preview: ' . $dbColumn,
+            ], 60);
+        } else {
+            set_transient('pbs_schema_dll_notice_' . get_current_user_id(), [
+                'ok' => false,
+                'message' => 'Colonna non removibile (solo manual/orphan).',
+            ], 60);
+        }
+
+        wp_safe_redirect(add_query_arg([
+            'page' => 'pbs-schema-fields',
+            'schema_id' => $schemaId,
+            'tab' => 'dll',
+        ], admin_url('admin.php')));
+        exit;
     }
 
     public function handle_field_add(): void
@@ -505,6 +793,19 @@ final class SchemaFieldsPage
         }
 
         $flags = json_decode((string) ($groupField['flags'] ?? ''), true) ?: [];
+        $groupKind = sanitize_key((string) ($flags['group']['kind'] ?? ''));
+        // Safety: splitting breaks the integrity of typized complex components (ACF-derived).
+        // For known complex kinds we allow only COPY (mirror) to "tirare fuori" valori.
+        if (in_array($groupKind, ['text', 'button'], true)) {
+            wp_safe_redirect(add_query_arg([
+                'page' => 'pbs-schema-fields',
+                'schema_id' => $schemaId,
+                'tab' => $returnTab !== '' ? $returnTab : 'schema',
+                'field_id' => $groupFieldId,
+                'pbs_err' => 'split_locked_kind',
+            ], admin_url('admin.php')));
+            exit;
+        }
         $members = (array) ($flags['group']['members'] ?? []);
         if (!isset($members[$memberIndex]) || !is_array($members[$memberIndex])) {
             wp_safe_redirect(add_query_arg(['page' => 'pbs-schema-fields', 'schema_id' => $schemaId, 'tab' => 'edit', 'field_id' => $groupFieldId, 'pbs_err' => 'group_member_missing'], admin_url('admin.php')));
